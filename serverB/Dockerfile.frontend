@@ -3,7 +3,7 @@ FROM node:18-bullseye-slim AS build
 WORKDIR /app
 
 # Copy frontend sources
-COPY serverB/frontend/package.json serverB/frontend/package-lock.json ./
+COPY serverB/frontend/package.json ./
 COPY serverB/frontend/ ./
 
 RUN npm install --legacy-peer-deps
