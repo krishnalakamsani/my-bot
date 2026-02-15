@@ -730,7 +730,7 @@ class TradingBot:
         except Exception:
             logger.exception("Error handling ORDER_PLACED event")
 
-    def _on_exit_signal_event(self, payload):
+    async def _on_exit_signal_event(self, payload):
         try:
             self.set_state(State.EXIT_PENDING)
             self.last_signal = payload
