@@ -234,8 +234,10 @@ def main():
                                                 logging.info("Published ENTRY_SIGNAL %s", {k: payload.get(k) for k in ('symbol','side','quantity','stop_loss')})
                                                 last_trade_time_utc = datetime.utcnow().replace(tzinfo=timezone.utc)
 
-            # add tick to current base candle
-            base_candle.add_tick(ltp)
+                    # add tick to current base candle
+                    base_candle.add_tick(ltp)
+                except Exception:
+                    logging.exception("Error while processing message")
 
         except Exception:
             logging.exception("Error while processing tick")
