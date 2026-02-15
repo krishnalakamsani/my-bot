@@ -45,47 +45,6 @@ services:
       SIMULATE: ${SIMULATE:-true}
     networks:
       - mybot_net
-
-  # Optional backend/frontend and execution API for UI or integrations
-  backend:
-    build: ..
-    container_name: trading_backend
-    command: /bin/sh -c "pip install --no-cache-dir fastapi uvicorn || true && uvicorn server:app --host 0.0.0.0 --port 8000"
-    env_file:
-      - ../.env
-    depends_on:
-      - postgres
-      - redis
-    expose:
-      - "8000"
-    networks:
-      - mybot_net
-
-  frontend:
-    build: ../frontend
-    container_name: trading_frontend
-    environment:
-      - REACT_APP_API_BASE_URL=${FRONTEND_API_BASE_URL:-http://backend:8000}
-    depends_on:
-      - backend
-    ports:
-      - "3000:80"
-    networks:
-      - mybot_net
-
-  execution_api:
-    build: ..
-    container_name: trading_execution_api
-    command: /bin/sh -c "pip install --no-cache-dir fastapi uvicorn psycopg2-binary || true && uvicorn execution_api:app --host 0.0.0.0 --port 8003"
-    env_file:
-      - ../.env
-    expose:
-      - "8003"
-    depends_on:
-      - postgres
-    networks:
-      - mybot_net
-
   # Local infra (can be removed if using Server A's infra)
   postgres:
     image: postgres:15
