@@ -797,6 +797,9 @@ class TradingBot:
             except Exception:
                 pass
 
+        except Exception:
+            logger.exception("Error handling EXIT_SIGNAL internals")
+
     # ---------------- Risk & State helpers ---------------------------------
     def _risk_checks_approve(self, tc: TradeContext) -> bool:
         # Enforce global trading_enabled
