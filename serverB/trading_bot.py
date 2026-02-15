@@ -848,37 +848,37 @@ class TradingBot:
                 pnl = 0.0
 
             tc.pnl = float(pnl)
-                # update bot_state totals
-                try:
-                    bot_state['daily_pnl'] = float(bot_state.get('daily_pnl', 0.0)) + pnl
-                except Exception:
-                    bot_state['daily_pnl'] = pnl
-
-                # consecutive loss tracking
-                try:
-                    if pnl < 0:
-                        bot_state['consecutive_losses'] = int(bot_state.get('consecutive_losses', 0)) + 1
-                    else:
-                        bot_state['consecutive_losses'] = 0
-                except Exception:
-                    pass
-
-                # kill switch enforcement
-                try:
-                    daily_max_loss = float(config.get('daily_max_loss', 0) or 0)
-                    if daily_max_loss and bot_state.get('daily_pnl', 0.0) <= -abs(daily_max_loss):
-                        bot_state['daily_max_loss_triggered'] = True
-                        bot_state['trading_enabled'] = False
-                except Exception:
-                    pass
-
-                # persist summary
-                try:
-                    bot_state['last_trade_result'] = {'pos_id': tc.pos_id, 'pnl': tc.pnl}
-                except Exception:
-                    pass
+            # update bot_state totals
+            try:
+                bot_state['daily_pnl'] = float(bot_state.get('daily_pnl', 0.0)) + pnl
             except Exception:
-                logger.exception('Error recording trade result')
+                bot_state['daily_pnl'] = pnl
+
+            # consecutive loss tracking
+            try:
+                if pnl < 0:
+                    bot_state['consecutive_losses'] = int(bot_state.get('consecutive_losses', 0)) + 1
+                else:
+                    bot_state['consecutive_losses'] = 0
+            except Exception:
+                pass
+
+            # kill switch enforcement
+            try:
+                daily_max_loss = float(config.get('daily_max_loss', 0) or 0)
+                if daily_max_loss and bot_state.get('daily_pnl', 0.0) <= -abs(daily_max_loss):
+                    bot_state['daily_max_loss_triggered'] = True
+                    bot_state['trading_enabled'] = False
+            except Exception:
+                pass
+
+            # persist summary
+            try:
+                bot_state['last_trade_result'] = {'pos_id': tc.pos_id, 'pnl': tc.pnl}
+            except Exception:
+                pass
+        except Exception:
+            logger.exception('Error recording trade result')
 
             if not live_security_id:
                 return False
