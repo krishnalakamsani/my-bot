@@ -841,13 +841,13 @@ class TradingBot:
                 if qty <= 0:
                     return
                 entry = float(tc.entry_price)
-                    pnl = (float(exit_price) - entry) * qty
-                    if str(tc.side).upper() in ('SELL', 'SHORT'):
-                        pnl = -pnl
-                except Exception:
-                    pnl = 0.0
+                pnl = (float(exit_price) - entry) * qty
+                if str(tc.side).upper() in ('SELL', 'SHORT'):
+                    pnl = -pnl
+            except Exception:
+                pnl = 0.0
 
-                tc.pnl = float(pnl)
+            tc.pnl = float(pnl)
                 # update bot_state totals
                 try:
                     bot_state['daily_pnl'] = float(bot_state.get('daily_pnl', 0.0)) + pnl
