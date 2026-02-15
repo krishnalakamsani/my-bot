@@ -65,8 +65,8 @@ Quick overview
       Backend --> Exec
     end
 
-    Adapter -->|HTTP (candles, option_chain, quote)| Backend
-    RedisA -.->|pub/sub (optional)| Backend
+    Adapter -->|HTTP: candles · option_chain · quote| Backend
+    RedisA -.->|pubsub optional| Backend
 
     style ServerA fill:#f9f,stroke:#333,stroke-width:1px
     style ServerB fill:#9ff,stroke:#333,stroke-width:1px
