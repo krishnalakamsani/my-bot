@@ -1,24 +1,19 @@
-version: '3.8'
+version: '3.9'
 
 services:
-  # Server B expects an MDS producer (Server A) and shared infra on `mybot_net`.
-  # Ensure you create the network before starting: `docker network create mybot_net`.
-
+  # Core bot services
   execution:
     image: python:3.10-slim
     restart: unless-stopped
     volumes:
-      - ./:/app
+      - ../:/app
     working_dir: /app
-    command: python serverB/execution.py
+    command: /bin/sh -c "pip install --no-cache-dir redis psycopg2-binary || true && python serverB/execution.py"
+    env_file:
+      - ../.env
     environment:
-      MDS_BASE_URL: http://mds:8000
-      REDIS_HOST: redis
-      POSTGRES_HOST: postgres
-      POSTGRES_DB: candles
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      SIMULATE: "true"
+      MDS_BASE_URL: ${MDS_BASE_URL:-http://mds:8000}
+      SIMULATE: ${SIMULATE:-true}
     networks:
       - mybot_net
 
@@ -26,18 +21,14 @@ services:
     image: python:3.10-slim
     restart: unless-stopped
     volumes:
-      - ./:/app
+      - ../:/app
     working_dir: /app
-    command: python serverB/strategy_service.py
+    command: /bin/sh -c "pip install --no-cache-dir redis pandas numpy httpx || true && python serverB/strategy_service.py"
+    env_file:
+      - ../.env
     environment:
-      MDS_BASE_URL: http://mds:8000
-      REDIS_HOST: redis
-      SIMULATE: "true"
-      SECURITY_ID: SIM_EXAMPLE
-      LOT_SIZE: "65"
-      MIN_TRADE_GAP: "300"
-      ATR_PERIOD: "14"
-      ATR_MULTIPLIER: "1.5"
+      MDS_BASE_URL: ${MDS_BASE_URL:-http://mds:8000}
+      SIMULATE: ${SIMULATE:-true}
     networks:
       - mybot_net
 
@@ -45,35 +36,21 @@ services:
     image: python:3.10-slim
     restart: unless-stopped
     volumes:
-      - ./:/app
+      - ../:/app
     working_dir: /app
-    command: python serverB/trading_bot.py
+    command: /bin/sh -c "pip install --no-cache-dir redis || true && python serverB/trading_bot.py"
+    env_file:
+      - ../.env
     environment:
-      REDIS_HOST: redis
-      SIMULATE: "true"
+      SIMULATE: ${SIMULATE:-true}
     networks:
       - mybot_net
 
-networks:
-  mybot_net:
-    driver: bridge
-version: "3.9"
-
-services:
+  # Optional backend/frontend and execution API for UI or integrations
   backend:
-    build: .
+    build: ..
     container_name: trading_backend
-    command: uvicorn server:app --host 0.0.0.0 --port 8000
-    environment:
-      - REDIS_HOST=redis
-      - REDIS_PASSWORD=${REDIS_PASSWORD}
-      - DHAN_CLIENT_ID=${DHAN_CLIENT_ID}
-      - DHAN_ACCESS_TOKEN=${DHAN_ACCESS_TOKEN}
-      - POSTGRES_HOST=postgres
-      - POSTGRES_DB=${POSTGRES_DB:-trades}
-      - POSTGRES_USER=${POSTGRES_USER:-postgres}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD_TRADES:-postgres}
-      - MDS_BASE_URL=${MDS_BASE_URL:-}
+    command: /bin/sh -c "pip install --no-cache-dir fastapi uvicorn || true && uvicorn server:app --host 0.0.0.0 --port 8000"
     env_file:
       - ../.env
     depends_on:
@@ -81,9 +58,11 @@ services:
       - redis
     expose:
       - "8000"
+    networks:
+      - mybot_net
 
   frontend:
-    build: ./frontend
+    build: ../frontend
     container_name: trading_frontend
     environment:
       - REACT_APP_API_BASE_URL=${FRONTEND_API_BASE_URL:-http://backend:8000}
@@ -91,52 +70,59 @@ services:
       - backend
     ports:
       - "3000:80"
-
+    networks:
+      - mybot_net
 
   execution_api:
-    build: .
+    build: ..
     container_name: trading_execution_api
-    command: uvicorn execution_api:app --host 0.0.0.0 --port 8003
-    environment:
-      - POSTGRES_HOST=postgres
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD_TRADES}
+    command: /bin/sh -c "pip install --no-cache-dir fastapi uvicorn psycopg2-binary || true && uvicorn execution_api:app --host 0.0.0.0 --port 8003"
     env_file:
       - ../.env
     expose:
       - "8003"
     depends_on:
       - postgres
+    networks:
+      - mybot_net
 
+  # Local infra (can be removed if using Server A's infra)
   postgres:
     image: postgres:15
-    container_name: trading_postgres
+    restart: unless-stopped
+    env_file:
+      - ../.env
     environment:
-      - POSTGRES_DB=${POSTGRES_DB:-trades}
-      - POSTGRES_USER=${POSTGRES_USER:-postgres}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD_TRADES:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-trades}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD_TRADES:-postgres}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-trades}"]
       interval: 10s
       timeout: 5s
       retries: 5
-    env_file:
-      - ../.env
+    networks:
+      - mybot_net
 
   redis:
     image: redis:7
-    container_name: trading_redis
+    restart: unless-stopped
     env_file:
       - ../.env
-    command: ["sh", "-c", "redis-server --save '' --appendonly no --requirepass ${REDIS_PASSWORD}"]
-    expose:
-      - "6379"
+    command: ["/bin/sh","-c","if [ -n \"${REDIS_PASSWORD}\" ]; then redis-server --requirepass ${REDIS_PASSWORD}; else redis-server; fi"]
     healthcheck:
-      test: ["CMD-SHELL", "redis-cli -a ${REDIS_PASSWORD} ping"]
+      test: ["CMD-SHELL", "redis-cli ping"]
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - mybot_net
 
 volumes:
   postgres_data:
+
+networks:
+  mybot_net:
+    driver: bridge
