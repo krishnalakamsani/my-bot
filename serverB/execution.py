@@ -574,3 +574,9 @@ def place_order(side, security_id, quantity, order_type="MARKET", price=None):
     from event_bus import publish
     publish("ENTRY_SIGNAL", payload)
     return {"status": "queued"}
+
+
+import time
+
+while True:
+    time.sleep(60)

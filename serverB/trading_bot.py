@@ -2676,3 +2676,9 @@ class TradingBot:
             'created_at': datetime.now(timezone.utc).isoformat()
         }))
 
+
+        import time
+
+        while True:
+            time.sleep(60)
+
