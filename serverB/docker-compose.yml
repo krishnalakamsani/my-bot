@@ -10,7 +10,7 @@ services:
     working_dir: /app
     command: /bin/sh -c "pip install --no-cache-dir redis psycopg2-binary || true && python serverB/execution.py"
     env_file:
-      - ../.env
+      - ./.env
     environment:
       MDS_BASE_URL: ${MDS_BASE_URL:-http://mds:8000}
       SIMULATE: ${SIMULATE:-true}
@@ -25,7 +25,7 @@ services:
     working_dir: /app
     command: /bin/sh -c "pip install --no-cache-dir redis pandas numpy httpx || true && python serverB/strategy_service.py"
     env_file:
-      - ../.env
+      - ./.env
     environment:
       MDS_BASE_URL: ${MDS_BASE_URL:-http://mds:8000}
       SIMULATE: ${SIMULATE:-true}
@@ -40,7 +40,7 @@ services:
     working_dir: /app
     command: /bin/sh -c "pip install --no-cache-dir redis || true && python serverB/trading_bot.py"
     env_file:
-      - ../.env
+      - ./.env
     environment:
       SIMULATE: ${SIMULATE:-true}
     networks:
@@ -50,7 +50,7 @@ services:
     image: postgres:15
     restart: unless-stopped
     env_file:
-      - ../.env
+      - ./.env
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-trades}
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
@@ -69,7 +69,7 @@ services:
     image: redis:7
     restart: unless-stopped
     env_file:
-      - ../.env
+      - ./.env
     command: ["/bin/sh","-c","if [ -n \"${REDIS_PASSWORD}\" ]; then redis-server --requirepass ${REDIS_PASSWORD}; else redis-server; fi"]
     healthcheck:
       test: ["CMD-SHELL", "redis-cli ping"]

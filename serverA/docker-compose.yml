@@ -5,7 +5,7 @@ services:
     image: redis:7
     restart: unless-stopped
     env_file:
-      - ../.env
+      - ./.env
     ports:
       - "6379:6379"
     command: ["/bin/sh","-c","if [ -n \"${REDIS_PASSWORD}\" ]; then redis-server --requirepass ${REDIS_PASSWORD}; else redis-server; fi"]
@@ -21,7 +21,7 @@ services:
     image: postgres:15
     restart: unless-stopped
     env_file:
-      - ../.env
+      - ./.env
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-candles}
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
