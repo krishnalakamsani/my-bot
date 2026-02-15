@@ -1,0 +1,25 @@
+flowchart LR
+  subgraph ServerA[Server A - Market Data Service]
+    Feed[Feed Service\n(Dhan SDK)]
+    RedisA[Redis]
+    PgM[Postgres\n(candles & option_chains)]
+    Adapter[MDS Adapter\n(HTTP API)]
+    Feed --> RedisA
+    Feed --> PgM
+    RedisA --> Adapter
+    PgM --> Adapter
+  end
+
+  subgraph ServerB[Server B - Trading Bot]
+    Backend[Backend\n(uvicorn)]
+    Frontend[Frontend\n(React)]
+    Exec[Execution API]
+    Backend --> Frontend
+    Backend --> Exec
+  end
+
+  Adapter -->|HTTP (candles, option_chain, quote)| Backend
+  RedisA -.->|pub/sub (optional)| Backend
+
+  style ServerA fill:#f9f,stroke:#333,stroke-width:1px
+  style ServerB fill:#9ff,stroke:#333,stroke-width:1px
