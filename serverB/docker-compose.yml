@@ -1,3 +1,62 @@
+version: '3.8'
+
+services:
+  # Server B expects an MDS producer (Server A) and shared infra on `mybot_net`.
+  # Ensure you create the network before starting: `docker network create mybot_net`.
+
+  execution:
+    image: python:3.10-slim
+    restart: unless-stopped
+    volumes:
+      - ./:/app
+    working_dir: /app
+    command: python serverB/execution.py
+    environment:
+      MDS_BASE_URL: http://mds:8000
+      REDIS_HOST: redis
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: candles
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      SIMULATE: "true"
+    networks:
+      - mybot_net
+
+  strategy:
+    image: python:3.10-slim
+    restart: unless-stopped
+    volumes:
+      - ./:/app
+    working_dir: /app
+    command: python serverB/strategy_service.py
+    environment:
+      MDS_BASE_URL: http://mds:8000
+      REDIS_HOST: redis
+      SIMULATE: "true"
+      SECURITY_ID: SIM_EXAMPLE
+      LOT_SIZE: "65"
+      MIN_TRADE_GAP: "300"
+      ATR_PERIOD: "14"
+      ATR_MULTIPLIER: "1.5"
+    networks:
+      - mybot_net
+
+  trading_bot:
+    image: python:3.10-slim
+    restart: unless-stopped
+    volumes:
+      - ./:/app
+    working_dir: /app
+    command: python serverB/trading_bot.py
+    environment:
+      REDIS_HOST: redis
+      SIMULATE: "true"
+    networks:
+      - mybot_net
+
+networks:
+  mybot_net:
+    driver: bridge
 version: "3.9"
 
 services:

@@ -1,3 +1,54 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: candles
+      POSTGRES_USER: postgres
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - mybot_net
+
+  redis:
+    image: redis:7
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    networks:
+      - mybot_net
+
+  mds:
+    image: python:3.10-slim
+    restart: unless-stopped
+    volumes:
+      - ./:/app
+    working_dir: /app
+    command: uvicorn serverA.market_data_service:app --host 0.0.0.0 --port 8000
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: candles
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      REDIS_HOST: redis
+      # If you use Redis password, set REDIS_PASSWORD here or via env file
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - mybot_net
+
+volumes:
+  pgdata:
+
+networks:
+  mybot_net:
+    driver: bridge
 version: "3.9"
 
 services:
