@@ -665,27 +665,32 @@ class TradingBot:
                 return
             pos_id = payload.get('pos_id') or payload.get('trade_id') or payload.get('db_id')
             # If this corresponds to our active trade, abort and clear
-            try:
-                if self.trade_context and (str(self.trade_context.pos_id) == str(pos_id) or str(self.trade_context.db_id) == str(payload.get('db_id') or '')):
-                    logger.warning("Order timeout for trade %s — aborting trade_context", pos_id)
-                    # treat as failed attempt
-                    try:
-                        bot_state['consecutive_losses'] = int(bot_state.get('consecutive_losses', 0)) + 1
-                    except Exception:
-                        pass
-                    try:
-                        self.trade_context.state = State.CLOSED
-                        bot_state['trade_context'] = self.trade_context.to_dict()
-                    except Exception:
-                        pass
-                    try:
-                        self.trade_context = None
-                    except Exception:
-                        pass
-                    try:
-                        self.set_state(State.CLOSED)
-                    except Exception:
-                        pass
+            if self.trade_context and (str(self.trade_context.pos_id) == str(pos_id) or str(self.trade_context.db_id) == str(payload.get('db_id') or '')):
+                logger.warning("Order timeout for trade %s — aborting trade_context", pos_id)
+                # treat as failed attempt
+                try:
+                    bot_state['consecutive_losses'] = int(bot_state.get('consecutive_losses', 0)) + 1
+                except Exception:
+                    pass
+                try:
+                    self.trade_context.state = State.CLOSED
+                    bot_state['trade_context'] = self.trade_context.to_dict()
+                except Exception:
+                    pass
+                # clear local context and current position
+                try:
+                    self.trade_context = None
+                except Exception:
+                    pass
+                try:
+                    self.current_position = None
+                    bot_state['current_position'] = None
+                except Exception:
+                    pass
+                try:
+                    self.set_state(State.CLOSED)
+                except Exception:
+                    pass
         except Exception:
             logger.exception('Error handling ORDER_TIMEOUT')
 
@@ -792,47 +797,47 @@ class TradingBot:
             except Exception:
                 pass
 
-        # ---------------- Risk & State helpers ---------------------------------
-        def _risk_checks_approve(self, tc: TradeContext) -> bool:
-            # Enforce global trading_enabled
-            if not bool(config.get('trading_enabled', True)) or not bool(bot_state.get('trading_enabled', True)):
-                logger.warning("Trading disabled via config/state")
-                return False
+    # ---------------- Risk & State helpers ---------------------------------
+    def _risk_checks_approve(self, tc: TradeContext) -> bool:
+        # Enforce global trading_enabled
+        if not bool(config.get('trading_enabled', True)) or not bool(bot_state.get('trading_enabled', True)):
+            logger.warning("Trading disabled via config/state")
+            return False
 
-            # Daily absolute loss check
-            daily_pnl = float(bot_state.get('daily_pnl', 0.0) or 0.0)
-            daily_max_loss = float(config.get('daily_max_loss', 0) or 0)
-            if daily_max_loss and daily_pnl <= -abs(daily_max_loss):
-                logger.warning("Daily max loss exceeded (%.2f <= -%.2f)", daily_pnl, daily_max_loss)
-                bot_state['daily_max_loss_triggered'] = True
-                bot_state['trading_enabled'] = False
-                return False
+        # Daily absolute loss check
+        daily_pnl = float(bot_state.get('daily_pnl', 0.0) or 0.0)
+        daily_max_loss = float(config.get('daily_max_loss', 0) or 0)
+        if daily_max_loss and daily_pnl <= -abs(daily_max_loss):
+            logger.warning("Daily max loss exceeded (%.2f <= -%.2f)", daily_pnl, daily_max_loss)
+            bot_state['daily_max_loss_triggered'] = True
+            bot_state['trading_enabled'] = False
+            return False
 
-            # Consecutive losses check
-            consecutive = int(bot_state.get('consecutive_losses', 0) or 0)
-            limit = int(config.get('consecutive_losses_limit', 3) or 3)
-            if limit and consecutive >= limit:
-                logger.warning("Consecutive losses limit reached: %s", consecutive)
-                bot_state['trading_enabled'] = False
-                return False
+        # Consecutive losses check
+        consecutive = int(bot_state.get('consecutive_losses', 0) or 0)
+        limit = int(config.get('consecutive_losses_limit', 3) or 3)
+        if limit and consecutive >= limit:
+            logger.warning("Consecutive losses limit reached: %s", consecutive)
+            bot_state['trading_enabled'] = False
+            return False
 
-            # Minimum size and basic checks
-            if not tc.size or tc.size <= 0:
-                logger.warning("Computed trade size is zero; skipping")
-                return False
+        # Minimum size and basic checks
+        if not tc.size or tc.size <= 0:
+            logger.warning("Computed trade size is zero; skipping")
+            return False
 
-            return True
+        return True
 
-        def _record_trade_result(self, tc: TradeContext, exit_price: float):
+    def _record_trade_result(self, tc: TradeContext, exit_price: float):
+        try:
+            if not tc or tc.entry_price is None:
+                return
+            # crude pnl calc: (exit - entry) * qty; sign depends on side
             try:
-                if not tc or tc.entry_price is None:
+                qty = int(tc.size or 0)
+                if qty <= 0:
                     return
-                # crude pnl calc: (exit - entry) * qty; sign depends on side
-                try:
-                    qty = int(tc.size or 0)
-                    if qty <= 0:
-                        return
-                    entry = float(tc.entry_price)
+                entry = float(tc.entry_price)
                     pnl = (float(exit_price) - entry) * qty
                     if str(tc.side).upper() in ('SELL', 'SHORT'):
                         pnl = -pnl
