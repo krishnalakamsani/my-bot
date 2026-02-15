@@ -2,5 +2,4 @@
 serverA/secrets/
 serverB/secrets/
 secrets/
-*.txt
 .env
