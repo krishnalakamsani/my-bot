@@ -70,6 +70,20 @@ services:
     networks:
       - mybot_net
 
+  frontend:
+    build:
+      context: ..
+      dockerfile: serverB/Dockerfile.frontend
+    restart: unless-stopped
+    env_file:
+      - ./.env
+    environment:
+      REACT_APP_BACKEND_URL: ${REACT_APP_BACKEND_URL:-http://localhost:8000}
+    ports:
+      - "3000:3000"
+    networks:
+      - mybot_net
+
 volumes:
   postgres_data:
 
