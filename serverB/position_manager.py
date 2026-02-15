@@ -9,7 +9,10 @@ logger = logging.getLogger(__name__)
 class Position:
     def __init__(self, symbol: str, side: str, quantity: int, entry_price: float, security_id: Optional[str] = None):
         self.symbol = symbol
-        self.side = side  # BUY or SELL
+        # validate side
+        if not isinstance(side, str) or side.upper() not in ("BUY", "SELL"):
+            raise ValueError(f"Invalid side: {side}")
+        self.side = side.upper()  # BUY or SELL
         self.quantity = int(quantity)
         self.entry_price = float(entry_price)
         self.security_id = security_id
@@ -18,6 +21,8 @@ class Position:
         self.exit_price = None
         self.pnl = 0.0
         self.trailing_sl = None
+        # position status: OPEN / CLOSED
+        self.status = "OPEN"
         self.tags: Dict[str, Any] = {}
 
     def to_dict(self):
@@ -32,6 +37,7 @@ class Position:
             "exit_price": self.exit_price,
             "pnl": self.pnl,
             "trailing_sl": self.trailing_sl,
+            "status": getattr(self, 'status', None),
             "tags": self.tags,
         }
 
@@ -43,10 +49,19 @@ class PositionManager:
 
     def open_position(self, pos_id: str, symbol: str, side: str, quantity: int, entry_price: float, security_id: Optional[str] = None, trailing_sl: Optional[float] = None):
         with self._lock:
-            if pos_id in self._positions:
-                logger.warning("Position %s already exists; overwriting", pos_id)
+            # Protect against accidental multiple positions
+            if self._positions:
+                logger.error("Attempted to open new position while existing positions present; rejecting open for %s", pos_id)
+                return None
+
+            # Also prevent duplicate symbol opens
+            if any((pos.symbol == symbol) for pos in self._positions.values()):
+                logger.warning("Position already open for symbol %s; rejecting new position %s", symbol, pos_id)
+                return None
+
             p = Position(symbol, side, quantity, entry_price, security_id)
             p.trailing_sl = trailing_sl
+            p.status = "OPEN"
             self._positions[pos_id] = p
             logger.info("Opened position %s: %s", pos_id, p.to_dict())
             return p
@@ -60,7 +75,15 @@ class PositionManager:
             p.exit_price = float(exit_price)
             p.closed_ts = datetime.utcnow()
             p.pnl = self._compute_pnl(p)
+            p.status = "CLOSED"
             logger.info("Closed position %s PnL=%.2f", pos_id, p.pnl)
+
+            # REMOVE FROM ACTIVE POSITIONS to avoid duplicates and memory leaks
+            try:
+                del self._positions[pos_id]
+            except KeyError:
+                pass
+
             return p
 
     def update_market_price(self, pos_id: str, market_price: float):
@@ -68,6 +91,9 @@ class PositionManager:
             p = self._positions.get(pos_id)
             if not p:
                 return None
+            # Do not overwrite realized PnL for closed positions
+            if p.closed_ts:
+                return p
             # compute unrealized PnL
             if p.side.upper() == 'BUY':
                 p.pnl = (market_price - p.entry_price) * p.quantity
@@ -81,7 +107,23 @@ class PositionManager:
 
     def list_positions(self):
         with self._lock:
+            # return snapshot (dict of dicts) for UI; callers needing live objects should use get_position()
             return {k: v.to_dict() for k, v in self._positions.items()}
+
+    def has_open_position(self) -> bool:
+        with self._lock:
+            return len(self._positions) > 0
+
+    def check_trailing_stop(self, pos_id: str, market_price: float) -> bool:
+        with self._lock:
+            p = self._positions.get(pos_id)
+            if not p or p.trailing_sl is None:
+                return False
+            if p.side.upper() == 'BUY' and market_price <= p.trailing_sl:
+                return True
+            if p.side.upper() == 'SELL' and market_price >= p.trailing_sl:
+                return True
+            return False
 
     def detect_broker_mismatch(self, pos_id: str, broker_security_id: Optional[str]):
         with self._lock:

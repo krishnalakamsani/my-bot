@@ -34,6 +34,46 @@ class TFIndicators:
         if self.st_flip_history is None:
             self.st_flip_history = deque(maxlen=6)
 
+    def clone(self):
+        """Lightweight clone that duplicates indicator internal arrays without deepcopy.
+
+        This creates new indicator instances and copies internal lists to avoid
+        mutating live state while peeking.
+        """
+        # clone supertrend
+        st = SuperTrend(period=self.supertrend.period, multiplier=self.supertrend.multiplier)
+        st.candles = list(self.supertrend.candles)
+        st.atr_values = list(self.supertrend.atr_values)
+        st.supertrend_values = list(self.supertrend.supertrend_values)
+        st.direction = self.supertrend.direction
+
+        # clone macd
+        m = MACD(fast=self.macd.fast, slow=self.macd.slow, signal=self.macd.signal_period)
+        m.closes = list(self.macd.closes)
+        m.macd_values = list(self.macd.macd_values)
+        m.last_macd = self.macd.last_macd
+        m.last_signal_line = self.macd.last_signal_line
+        m.last_histogram = self.macd.last_histogram
+        m.last_cross = self.macd.last_cross
+        m._fast_ema = self.macd._fast_ema
+        m._slow_ema = self.macd._slow_ema
+        m._signal_ema = self.macd._signal_ema
+        m._fast_seed = list(self.macd._fast_seed)
+        m._slow_seed = list(self.macd._slow_seed)
+        m._signal_seed = list(self.macd._signal_seed)
+        m._last_relation = self.macd._last_relation
+
+        clone = TFIndicators(
+            timeframe_seconds=self.timeframe_seconds,
+            supertrend=st,
+            macd=m,
+            prev_macd=self.prev_macd,
+            prev_hist=self.prev_hist,
+            prev_st_dir=self.prev_st_dir,
+            st_flip_history=deque(self.st_flip_history, maxlen=self.st_flip_history.maxlen if self.st_flip_history is not None else 6),
+        )
+        return clone
+
 
 @dataclass(frozen=True)
 class TFScore:
@@ -202,8 +242,8 @@ class ScoreEngine:
             state = self._agg_partial.get(next_tf, {})
             if state and state.get("count", 0) > 0:
                 partial = Candle(high=float(state["high"]), low=float(state["low"]), close=float(state["close"]))
-                # Use a deepcopy of the TFIndicators to avoid mutating real state
-                peek_state = deepcopy(self._tfs[next_tf])
+                # Use a lightweight clone of the TFIndicators to avoid mutating real state
+                peek_state = self._tfs[next_tf].clone()
                 tf_scores[next_tf] = self._compute_tf_score_from_state(peek_state, next_tf, partial)
 
         # Compute total score using the freshest TF scores available: prefer
@@ -232,12 +272,7 @@ class ScoreEngine:
 
         total_score = sum(per_tf_weighted.values())
 
-        # Normalize total score to [-1, 1] by dividing by maximum possible weighted score
-        max_possible_total = self._max_tf_raw * sum(self.tf_weights.values())
-        if max_possible_total <= 0:
-            normalized_total = 0.0
-        else:
-            normalized_total = max(-1.0, min(1.0, float(total_score) / float(max_possible_total)))
+
 
         # Apply EWMA smoothing to reduce volatile tick-to-tick changes.
         alpha = max(0.0, min(1.0, getattr(self, 'score_smoothing_alpha', 0.4)))
@@ -261,6 +296,13 @@ class ScoreEngine:
 
         confidence = self._confidence(smoothed_score, slope, stability, tf_scores, is_choppy)
         direction = self._direction(smoothed_score)
+
+        # Normalize smoothed score into [-1,1] using the correct max_possible_total
+        max_possible_total = self._max_tf_raw * sum(self.tf_weights.values())
+        if max_possible_total <= 0:
+            normalized_total = 0.0
+        else:
+            normalized_total = max(-1.0, min(1.0, float(smoothed_score) / float(max_possible_total)))
 
         ready_tfs = tuple(sorted(self._ready_timeframes()))
         ready = all(tf in ready_tfs for tf in self.timeframes)

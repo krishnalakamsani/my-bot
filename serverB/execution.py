@@ -1,6 +1,7 @@
 import os
 import logging
 from datetime import datetime
+from datetime import time as _time, timedelta
 
 import psycopg2
 import json
@@ -14,6 +15,10 @@ except Exception:
 
 from event_bus import subscribe, publish
 from position_manager import default_manager
+try:
+    from risk import check_risk
+except Exception:
+    check_risk = None
 
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s %(message)s")
 
@@ -48,61 +53,57 @@ def get_conn():
 
 def _start_pending_monitor():
     def _monitor():
+        import time
         while True:
             try:
-                import time
                 timeout = int(config.get('order_timeout_seconds', 30) or 30)
                 now = datetime.utcnow()
-                to_check = list(_pending_orders.items())
-                for key, meta in to_check:
+                for key, meta in list(_pending_orders.items()):
+                    placed = meta.get('placed_ts')
+                    if not placed:
+                        continue
                     try:
-                        placed = meta.get('placed_ts')
-                        if not placed:
-                            continue
                         age = (now - placed).total_seconds()
-                        if age >= timeout:
-                            # attempt best-effort cancel for live orders
-                            try:
-                                broker_info = meta.get('broker_info') or {}
-                                if not SIMULATE:
-                                    # attempt broker cancel if available
-                                    try:
-                                        if 'order_id' in broker_info and (DhanAPI is not None or True):
-                                            try:
-                                                if DhanAPI is not None:
-                                                    client = DhanAPI(DHAN_ACCESS_TOKEN, DHAN_CLIENT_ID)
-                                                    client.dhan.cancel_order(broker_info.get('order_id'))
-                                                else:
-                                                    from dhanhq import DhanContext
-                                                    client = DhanContext(client_id=DHAN_CLIENT_ID, access_token=DHAN_ACCESS_TOKEN)
-                                                    client.cancel_order(broker_info.get('order_id'))
-                                            except Exception:
-                                                pass
-                            except Exception:
-                                pass
-                            # publish ORDER_TIMEOUT
-                            try:
-                                publish('ORDER_TIMEOUT', {'pos_id': key, 'db_id': meta.get('db_id'), 'info': meta, 'age_seconds': age})
-                            except Exception:
-                                pass
-                            # mark DB record as timed-out
-                            try:
-                                with get_conn() as _c:
-                                    with _c.cursor() as cur:
-                                        cur.execute("UPDATE trades SET status=%s WHERE id=%s", ("timed_out", meta.get('db_id')))
-                            except Exception:
-                                pass
-                            # remove from pending map
-                            try:
-                                _pending_orders.pop(key, None)
-                            except Exception:
-                                pass
-                time.sleep(max(1, min(5, timeout//3 if timeout>0 else 5)))
+                    except Exception:
+                        continue
+                    if age < timeout:
+                        continue
+
+                    broker_info = meta.get('broker_info') or {}
+                    # attempt best-effort cancel for live orders
+                    if (not SIMULATE) and broker_info and broker_info.get('order_id'):
+                        try:
+                            if DhanAPI is not None:
+                                client = DhanAPI(DHAN_ACCESS_TOKEN, DHAN_CLIENT_ID)
+                                client.dhan.cancel_order(broker_info.get('order_id'))
+                            else:
+                                from dhanhq import DhanContext
+                                client = DhanContext(client_id=DHAN_CLIENT_ID, access_token=DHAN_ACCESS_TOKEN)
+                                client.cancel_order(broker_info.get('order_id'))
+                        except Exception:
+                            logging.exception('Broker cancel failed')
+
+                    # publish ORDER_TIMEOUT
+                    try:
+                        publish('ORDER_TIMEOUT', {'pos_id': key, 'db_id': meta.get('db_id'), 'info': meta, 'age_seconds': age})
+                    except Exception:
+                        logging.exception('Failed to publish ORDER_TIMEOUT')
+
+                    # mark DB record as timed-out
+                    try:
+                        with get_conn() as _c:
+                            with _c.cursor() as cur:
+                                cur.execute("UPDATE trades SET status=%s WHERE id=%s", ("timed_out", meta.get('db_id')))
+                    except Exception:
+                        logging.exception('Failed to mark DB timed_out')
+
+                    # remove from pending map
+                    _pending_orders.pop(key, None)
+
+                time.sleep(max(1, min(5, timeout // 3 if timeout > 0 else 5)))
             except Exception:
-                try:
-                    time.sleep(5)
-                except Exception:
-                    pass
+                logging.exception('pending monitor loop error')
+                time.sleep(5)
 
     t = threading.Thread(target=_monitor, daemon=True, name='pending-order-monitor')
     t.start()
@@ -135,6 +136,26 @@ def ensure_db():
                 )
     except Exception:
         logging.exception('Failed to ensure trades table')
+
+
+def is_market_open() -> bool:
+    """Return True if NSE market is open right now (approximate, based on IST timezone).
+
+    - Uses UTC time +5:30 to derive IST.
+    - Considers weekdays Monday-Friday and market hours 09:15-15:30 IST.
+    This is intentionally conservative and simple; integrate broker market-status API if available.
+    """
+    try:
+        now_utc = datetime.utcnow()
+        ist = now_utc + timedelta(hours=5, minutes=30)
+        # weekday: Monday=0 .. Friday=4
+        if ist.weekday() >= 5:
+            return False
+        start = _time(hour=9, minute=15)
+        end = _time(hour=15, minute=30)
+        return start <= ist.time() <= end
+    except Exception:
+        return False
 
 
 def record_trade(side, quantity, price, status="created", info=None):
@@ -187,26 +208,35 @@ def _release_advisory_lock(lock_key: int) -> None:
 def _handle_entry_signal(payload):
     """Handle published ENTRY_SIGNAL events.
 
-    Payload is expected to be a dict with keys: pos_id, symbol, side, quantity, price, security_id (opt)
+    Payload keys: pos_id, symbol, side, quantity, price, security_id (opt)
     """
-    lock_key = None
+    side = payload.get('side')
+    pos_id = payload.get('pos_id') or payload.get('id') or f"pos_{int(datetime.utcnow().timestamp())}"
+    lock_key = _compute_lock_key(pos_id)
     got_lock = False
-    try:
-        side = payload.get('side')
-        pos_id = payload.get('pos_id') or payload.get('id') or f"pos_{int(datetime.utcnow().timestamp())}"
-        lock_key = _compute_lock_key(pos_id)
-        # Try to acquire cross-process advisory lock first
-        if lock_key:
-            try:
-                got_lock = _acquire_advisory_lock(lock_key)
-            except Exception:
-                got_lock = False
+
+    # Try to acquire cross-process advisory lock
+    if lock_key:
+        got_lock = _acquire_advisory_lock(lock_key)
         if not got_lock:
-            logging.warning("Could not acquire advisory lock for pos=%s; skipping entry to avoid duplicate placement", pos_id)
+            logging.warning("Could not acquire advisory lock for pos=%s; skipping entry", pos_id)
             return
 
-        # global daily loss / kill-switch checks
+    try:
+        # centralized risk check if available
         try:
+            if check_risk is not None:
+                requested_q = int(payload.get('quantity') or 0)
+                approved, sized_q = check_risk(side, requested_q, payload)
+                if not approved:
+                    logging.warning('Risk check rejected entry for pos=%s', pos_id)
+                    return
+                # allow risk module to size the order
+                if sized_q and int(sized_q) > 0:
+                    payload['quantity'] = int(sized_q)
+        except Exception:
+            logging.exception('Risk module error; falling back to local checks')
+            # fallback local daily max loss guard
             if bool(bot_state.get('daily_max_loss_triggered', False)):
                 logging.warning('Daily max loss triggered; blocking entry for pos=%s', pos_id)
                 return
@@ -217,12 +247,16 @@ def _handle_entry_signal(payload):
                 bot_state['daily_max_loss_triggered'] = True
                 bot_state['trading_enabled'] = False
                 return
-        except Exception:
-            pass
 
         with _exec_lock:
             symbol = payload.get('symbol')
             quantity = int(payload.get('quantity') or 0)
+            # if risk module already sized the order, use it
+            try:
+                if check_risk is not None and payload.get('quantity') is not None:
+                    quantity = int(payload.get('quantity'))
+            except Exception:
+                pass
             if quantity <= 0:
                 logging.error("Invalid quantity for entry: %s", quantity)
                 return
@@ -231,31 +265,25 @@ def _handle_entry_signal(payload):
 
             logging.info("Execution received ENTRY_SIGNAL %s %s %s @%s", side, symbol, quantity, price)
 
-            # record in DB or simulate
             if SIMULATE:
                 tid = record_trade(side, quantity, price or 0, status="simulated", info={"security_id": security_id, "pos_id": pos_id})
-                # publish ORDER_PLACED then ORDER_FILLED immediately for simulated fills
                 placed_payload = {'trade_id': pos_id, 'db_id': tid, 'pos_id': pos_id, 'security_id': security_id, 'symbol': symbol, 'qty': quantity, 'price': price, 'status': 'simulated', 'placed_ts': datetime.utcnow().isoformat()}
                 publish('ORDER_PLACED', placed_payload)
-                # track pending
-                try:
-                    _pending_orders[pos_id] = {'db_id': tid, 'pos_id': pos_id, 'placed_ts': datetime.utcnow(), 'qty': quantity, 'side': side, 'price': price, 'broker_info': None}
-                except Exception:
-                    pass
-                default_manager.open_position(pos_id, symbol, side, quantity, price, security_id=security_id)
-                publish('ORDER_FILLED', {'trade_id': pos_id, 'db_id': tid, 'pos_id': pos_id, 'security_id': security_id, 'symbol': symbol, 'filled_qty': quantity, 'filled_price': price, 'status': 'simulated', 'filled_ts': datetime.utcnow().isoformat()})
-                # cleanup pending map for simulated immediate fills
-                try:
+                _pending_orders[pos_id] = {'db_id': tid, 'pos_id': pos_id, 'placed_ts': datetime.utcnow(), 'qty': quantity, 'side': side, 'price': price, 'broker_info': None, 'simulated': True}
+
+                if not is_market_open():
+                    default_manager.open_position(pos_id, symbol, side, quantity, price, security_id=security_id)
+                    publish('ORDER_FILLED', {'trade_id': pos_id, 'db_id': tid, 'pos_id': pos_id, 'security_id': security_id, 'symbol': symbol, 'filled_qty': quantity, 'filled_price': price, 'status': 'simulated', 'filled_ts': datetime.utcnow().isoformat()})
                     _pending_orders.pop(pos_id, None)
-                except Exception:
-                    pass
+                else:
+                    logging.warning('Market open; not simulating fill for pos=%s; left pending', pos_id)
                 return
 
+            # Live order
             if not DHAN_CLIENT_ID or not DHAN_ACCESS_TOKEN:
                 logging.error("Dhan credentials missing; cannot place live order")
                 return
 
-            # Live order placement (isolated try so we can record failures)
             try:
                 if DhanAPI is not None:
                     client = DhanAPI(DHAN_ACCESS_TOKEN, DHAN_CLIENT_ID)
@@ -270,7 +298,6 @@ def _handle_entry_signal(payload):
                     )
                 else:
                     from dhanhq import DhanContext
-
                     client = DhanContext(client_id=DHAN_CLIENT_ID, access_token=DHAN_ACCESS_TOKEN)
                     res = client.place_order(
                         security_id=security_id,
@@ -282,102 +309,62 @@ def _handle_entry_signal(payload):
                         product_type="INTRADAY",
                     )
 
-                # validate broker response for immediate rejection
-                try:
-                    if isinstance(res, dict) and str(res.get('status', '')).lower() in ("rejected", "failed"):
-                        logging.error("Broker rejected entry order: %s", res)
-                        record_trade(side, quantity, price or 0, status="rejected", info={'res': res, 'pos_id': pos_id})
-                        return
-                except Exception:
-                    pass
+                if isinstance(res, dict) and str(res.get('status', '')).lower() in ("rejected", "failed"):
+                    logging.error("Broker rejected entry order: %s", res)
+                    record_trade(side, quantity, price or 0, status="rejected", info={'res': res, 'pos_id': pos_id})
+                    return
 
                 tid = record_trade(side, quantity, price or 0, status="sent", info={'res': res, 'pos_id': pos_id})
-                # publish ORDER_PLACED
-                try:
-                    placed_payload = {'trade_id': pos_id, 'db_id': tid, 'pos_id': pos_id, 'security_id': security_id, 'symbol': symbol, 'qty': quantity, 'price': price, 'status': 'sent', 'broker_info': res, 'placed_ts': datetime.utcnow().isoformat()}
-                    publish('ORDER_PLACED', placed_payload)
-                except Exception:
-                    logging.exception('Failed to publish ORDER_PLACED')
-
-                # register the position best-effort
+                publish('ORDER_PLACED', {'trade_id': pos_id, 'db_id': tid, 'pos_id': pos_id, 'security_id': security_id, 'symbol': symbol, 'qty': quantity, 'price': price, 'status': 'sent', 'broker_info': res, 'placed_ts': datetime.utcnow().isoformat()})
                 default_manager.open_position(pos_id, symbol, side, quantity, price, security_id=security_id)
-                # track pending order for timeout/slippage monitoring
-                try:
-                    _pending_orders[pos_id] = {'db_id': tid, 'pos_id': pos_id, 'placed_ts': datetime.utcnow(), 'qty': quantity, 'side': side, 'price': price, 'broker_info': res}
-                except Exception:
-                    pass
+                _pending_orders[pos_id] = {'db_id': tid, 'pos_id': pos_id, 'placed_ts': datetime.utcnow(), 'qty': quantity, 'side': side, 'price': price, 'broker_info': res}
 
-                # best-effort: if broker reports an immediate fill, emit ORDER_FILLED and place SL
-                try:
-                    filled = False
-                    filled_qty = None
-                    filled_price = None
-                    if isinstance(res, dict):
-                        if res.get('status') and str(res.get('status')).lower() in ('filled', 'complete', 'filled_with_trade'):
-                            filled = True
-                        filled_qty = res.get('filled_quantity') or res.get('filledQty') or res.get('filled_qty')
-                        filled_price = res.get('avg_price') or res.get('filled_price') or res.get('avgPrice')
-                    if filled or (filled_qty and filled_price):
-                        publish('ORDER_FILLED', {'trade_id': pos_id, 'db_id': tid, 'pos_id': pos_id, 'security_id': security_id, 'symbol': symbol, 'filled_qty': filled_qty or quantity, 'filled_price': filled_price or price, 'status': 'filled', 'broker_info': res, 'filled_ts': datetime.utcnow().isoformat()})
-                        # cleanup pending map after immediate broker fill
-                        try:
-                            _pending_orders.pop(pos_id, None)
-                        except Exception:
-                            pass
-                        # place broker-side stop-loss if configured
-                        try:
-                            sl_points = float(config.get('initial_stoploss', 0) or 0)
-                            if sl_points and not SIMULATE:
-                                try:
-                                    entry_price = float(filled_price or price or 0)
-                                    if entry_price:
-                                        if str(side).upper() == 'BUY':
-                                            trigger = max(0.0, entry_price - sl_points)
-                                            sl_side = 'SELL'
-                                        else:
-                                            trigger = entry_price + sl_points
-                                            sl_side = 'BUY'
-                                        try:
-                                            if DhanAPI is not None:
-                                                client = DhanAPI(DHAN_ACCESS_TOKEN, DHAN_CLIENT_ID)
-                                                client.dhan.place_order(
-                                                    security_id=security_id,
-                                                    exch_seg='NSE',
-                                                    transaction_type=sl_side,
-                                                    quantity=quantity,
-                                                    order_type='SL-M',
-                                                    trigger_price=trigger,
-                                                    product_type='INTRADAY',
-                                                )
-                                            else:
-                                                from dhanhq import DhanContext
-                                                client = DhanContext(client_id=DHAN_CLIENT_ID, access_token=DHAN_ACCESS_TOKEN)
-                                                client.place_order(
-                                                    security_id=security_id,
-                                                    exch_seg='NSE',
-                                                    transaction_type=sl_side,
-                                                    quantity=quantity,
-                                                    order_type='SL-M',
-                                                    trigger_price=trigger,
-                                                    product_type='INTRADAY',
-                                                )
-                                        except Exception:
-                                            logging.exception('Failed placing broker SL order')
-                        except Exception:
-                            pass
-                except Exception:
-                    logging.exception('Failed to evaluate broker fill and publish ORDER_FILLED')
+                # immediate fill detection
+                filled = False
+                filled_qty = None
+                filled_price = None
+                if isinstance(res, dict):
+                    if res.get('status') and str(res.get('status')).lower() in ('filled', 'complete', 'filled_with_trade'):
+                        filled = True
+                    filled_qty = res.get('filled_quantity') or res.get('filledQty') or res.get('filled_qty')
+                    filled_price = res.get('avg_price') or res.get('filled_price') or res.get('avgPrice')
+
+                if filled or (filled_qty and filled_price):
+                    publish('ORDER_FILLED', {'trade_id': pos_id, 'db_id': tid, 'pos_id': pos_id, 'security_id': security_id, 'symbol': symbol, 'filled_qty': filled_qty or quantity, 'filled_price': filled_price or price, 'status': 'filled', 'broker_info': res, 'filled_ts': datetime.utcnow().isoformat()})
+                    _pending_orders.pop(pos_id, None)
+
+                    # place broker-side SL
+                    try:
+                        sl_points = float(config.get('initial_stoploss', 0) or 0)
+                        if sl_points and not SIMULATE:
+                            entry_price = float(filled_price or price or 0)
+                            if entry_price:
+                                if str(side).upper() == 'BUY':
+                                    trigger = max(0.0, entry_price - sl_points)
+                                    sl_side = 'SELL'
+                                else:
+                                    trigger = entry_price + sl_points
+                                    sl_side = 'BUY'
+                                if DhanAPI is not None:
+                                    client = DhanAPI(DHAN_ACCESS_TOKEN, DHAN_CLIENT_ID)
+                                    client.dhan.place_order(security_id=security_id, exch_seg='NSE', transaction_type=sl_side, quantity=quantity, order_type='SL-M', trigger_price=trigger, product_type='INTRADAY')
+                                else:
+                                    from dhanhq import DhanContext
+                                    client = DhanContext(client_id=DHAN_CLIENT_ID, access_token=DHAN_ACCESS_TOKEN)
+                                    client.place_order(security_id=security_id, exch_seg='NSE', transaction_type=sl_side, quantity=quantity, order_type='SL-M', trigger_price=trigger, product_type='INTRADAY')
+                    except Exception:
+                        logging.exception('Failed placing broker SL order')
+
             except Exception:
                 logging.exception('Live order failed')
                 record_trade(side, quantity, price or 0, status="failed")
-    except Exception:
-        logging.exception("Execution ENTRY handler failed")
+
     finally:
-        try:
-            if got_lock and lock_key:
+        if got_lock and lock_key:
+            try:
                 _release_advisory_lock(lock_key)
-        except Exception:
-            pass
+            except Exception:
+                logging.exception('Failed to release advisory lock')
 
 
 def _handle_exit_signal(payload):
@@ -499,7 +486,22 @@ def _handle_exit_signal(payload):
                     logging.info('Exit order sent to broker for pos=%s; awaiting fill', pos_id)
                     return
 
-                # SIMULATE: just close internally
+                # SIMULATE: never simulate exit fills while market is open
+                if SIMULATE and is_market_open():
+                    # publish ORDER_PLACED and keep pending; do not close internally
+                    tid = record_trade(("SELL" if str(p.get('side')).upper() == 'BUY' else "BUY"), qty, price or 0, status="simulated", info={'pos_id': pos_id})
+                    try:
+                        placed_payload = {'trade_id': pos_id, 'db_id': tid, 'pos_id': pos_id, 'security_id': p.get('security_id'), 'symbol': p.get('symbol'), 'qty': qty, 'price': price, 'status': 'simulated', 'placed_ts': datetime.utcnow().isoformat()}
+                        publish('ORDER_PLACED', placed_payload)
+                    except Exception:
+                        logging.exception('Failed to publish ORDER_PLACED for simulated exit')
+                    try:
+                        _pending_orders[pos_id] = {'db_id': tid, 'pos_id': pos_id, 'placed_ts': datetime.utcnow(), 'qty': qty, 'side': ("SELL" if str(p.get('side')).upper() == 'BUY' else "BUY"), 'price': price, 'broker_info': None, 'simulated': True}
+                    except Exception:
+                        pass
+                    logging.warning('Market open; simulated exit for pos=%s will not auto-close position', pos_id)
+                    return
+                # SIMULATE and market closed: just close internally
                 default_manager.close_position(pos_id, price)
                 record_trade(p.get('side'), qty, price or 0, status="closed", info={"pos_id": pos_id})
                 return
