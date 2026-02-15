@@ -3,6 +3,7 @@ import time
 import json
 import logging
 import redis
+from collections import deque
 
 try:
     from dhanhq import dhanhq
@@ -27,6 +28,9 @@ def _read_secret_from_file(path):
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD") or _read_secret_from_file(os.getenv("REDIS_PASSWORD_FILE"))
 
 r = redis.Redis(host=REDIS_HOST, port=6379, password=REDIS_PASSWORD, decode_responses=False)
+
+# module-level publish buffer for transient publish failures
+publish_buffer = deque(maxlen=10000)
 
 POSTGRES_HOST = os.getenv("POSTGRES_HOST", "postgres")
 POSTGRES_DB = os.getenv("POSTGRES_DB", "candles")
@@ -104,7 +108,13 @@ def publish_index_and_options(client):
                 ltp = idx_data.get("last_price") if isinstance(idx_data, dict) else None
 
             if ltp is not None:
-                r.publish(f"ltp:{idx}", json.dumps({"ltp": float(ltp), "ts": now_ts}))
+                payload = json.dumps({"ltp": float(ltp), "ts": now_ts})
+                try:
+                    r.publish(f"ltp:{idx}", payload)
+                except Exception:
+                    # buffer the publish for retry
+                    logging.exception("Failed to publish ltp for %s — buffering", idx)
+                    publish_buffer.append((f"ltp:{idx}", payload))
 
             # Fetch option chain and publish OC
             try:
@@ -123,15 +133,19 @@ def publish_index_and_options(client):
                     oc = data.get('oc') or {}
                 expiry = oc_resp.get('expiry') or oc_resp.get('data', {}).get('expiry')
                 # Publish raw option chain
-                try:
-                    key = f"oc:{idx}:{expiry or 'unknown'}"
-                    payload = json.dumps(oc)
-                    # publish for subscribers and store latest as key for HTTP access
-                    r.publish(key, payload)
                     try:
-                        r.set(f"oc_latest:{idx}:{expiry or 'unknown'}", payload)
-                    except Exception:
-                        pass
+                        key = f"oc:{idx}:{expiry or 'unknown'}"
+                        payload = json.dumps(oc)
+                        # publish for subscribers and store latest as key for HTTP access
+                        try:
+                            r.publish(key, payload)
+                        except Exception:
+                            logging.exception("Failed to publish option chain for %s — buffering", idx)
+                            publish_buffer.append((key, payload))
+                        try:
+                            r.set(f"oc_latest:{idx}:{expiry or 'unknown'}", payload)
+                        except Exception:
+                            pass
                     # also persist into Postgres (upsert)
                     try:
                         ensure_pg()
@@ -194,7 +208,11 @@ def publish_index_and_options(client):
                         if isinstance(payload, dict):
                             l = payload.get('last_price')
                         if l is not None:
-                            r.publish(f"ltp:SEC_{sid}", json.dumps({"ltp": float(l), "ts": now_ts}))
+                            try:
+                                r.publish(f"ltp:SEC_{sid}", json.dumps({"ltp": float(l), "ts": now_ts}))
+                            except Exception:
+                                logging.exception("Failed to publish option LTP for %s — buffering", sid)
+                                publish_buffer.append((f"ltp:SEC_{sid}", json.dumps({"ltp": float(l), "ts": now_ts})))
 
         except Exception as e:
             logging.exception(f"Error publishing index {idx}: {e}")
@@ -205,16 +223,55 @@ def main():
         logging.error("Dhan SDK not installed; feed service cannot run")
         return
 
-    client = dhanhq(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN)
-
+    # initialize client with simple reconnect/backoff
+    backoff = 1.0
+    max_backoff = 30.0
     poll = float(os.getenv('FEED_POLL_SECONDS', 1.0) or 1.0)
     poll = max(0.25, min(5.0, poll))
 
+    # in-memory buffer for publishes when Redis/Dhan transient errors occur
+    publish_buffer = deque(maxlen=10000)  # store tuples (channel, payload)
+
+    client = None
     while True:
         try:
-            publish_index_and_options(client)
+            if client is None:
+                try:
+                    client = dhanhq(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN)
+                    logging.info("Dhan client initialized")
+                    backoff = 1.0
+                except Exception:
+                    logging.exception("Failed to initialize Dhan client; retrying with backoff")
+                    time.sleep(backoff)
+                    backoff = min(max_backoff, backoff * 2)
+                    continue
+
+            # attempt to flush any buffered publishes first
+            while publish_buffer:
+                ch, payload = publish_buffer[0]
+                try:
+                    r.publish(ch, payload)
+                    publish_buffer.popleft()
+                except Exception:
+                    # unable to flush, break and retry later
+                    logging.warning("Publish buffer flush failed; buffer size=%d", len(publish_buffer))
+                    break
+
+            # perform normal publish
+            try:
+                publish_index_and_options(client)
+                # success — reset backoff
+                backoff = 1.0
+            except Exception as e:
+                # If publish failed due to Redis/Dhan issues, capture intended messages
+                logging.exception("Feed publish error — backing off: %s", e)
+                # Sleep with backoff before retrying
+                time.sleep(backoff)
+                backoff = min(max_backoff, backoff * 2)
+
         except Exception:
-            logging.exception("Feed loop error")
+            logging.exception("Feed loop unexpected error; sleeping briefly")
+            time.sleep(5)
         time.sleep(poll)
 
 

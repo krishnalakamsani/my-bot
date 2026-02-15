@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 import redis
 import pandas as pd
 import numpy as np
-from execution import place_order as exec_place_order
+from event_bus import publish
 from risk import check_risk
 
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s %(message)s")
@@ -94,9 +94,14 @@ def aggregate_candles(candles):
 
 
 def place_order(side, quantity, price=None):
-    """Delegate order placement to the `execution` module."""
-    logging.info("Strategy.place_order delegate: %s %s @%s", side, quantity, price)
-    return exec_place_order(side, SECURITY_ID, quantity, price=price)
+    """Deprecated helper — publish an ENTRY_SIGNAL instead of placing orders directly.
+
+    Kept for backwards compatibility; prefer publishing `ENTRY_SIGNAL` from strategies.
+    """
+    logging.warning("strategy_service.place_order is deprecated; publishing ENTRY_SIGNAL instead")
+    payload = {"symbol": SECURITY_ID, "side": side, "quantity": quantity, "price": price, "security_id": SECURITY_ID}
+    publish("ENTRY_SIGNAL", payload)
+    return {"status": "queued"}
 
 
 def main():
@@ -163,11 +168,11 @@ def main():
                         if breakout_long:
                             logging.info("Breakout LONG detected")
                             if check_risk(0, "BUY", LOT_SIZE):
-                                exec_place_order("BUY", SECURITY_ID, LOT_SIZE)
+                                publish("ENTRY_SIGNAL", {"symbol": SECURITY_ID, "side": "BUY", "quantity": LOT_SIZE, "price": None, "security_id": SECURITY_ID})
                         elif breakout_short:
                             logging.info("Breakout SHORT detected")
                             if check_risk(0, "SELL", LOT_SIZE):
-                                exec_place_order("SELL", SECURITY_ID, LOT_SIZE)
+                                publish("ENTRY_SIGNAL", {"symbol": SECURITY_ID, "side": "SELL", "quantity": LOT_SIZE, "price": None, "security_id": SECURITY_ID})
 
             # add tick to current base candle
             base_candle.add_tick(ltp)

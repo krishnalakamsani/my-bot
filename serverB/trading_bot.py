@@ -19,6 +19,27 @@ from database import save_trade, update_trade_exit
 
 logger = logging.getLogger(__name__)
 
+from enum import Enum
+try:
+    from event_bus import subscribe
+except Exception:
+    subscribe = lambda *a, **k: None
+
+
+class State(Enum):
+    IDLE = "IDLE"
+    SIGNAL_GENERATED = "SIGNAL_GENERATED"
+    ORDER_PLACED = "ORDER_PLACED"
+    POSITION_OPEN = "POSITION_OPEN"
+    EXIT_PENDING = "EXIT_PENDING"
+    CLOSED = "CLOSED"
+
+
+def _default_signal_handler(payload):
+    # placeholder used if instance method can't be bound
+    return None
+
+
 
 class TradingBot:
     """Main trading bot engine"""
@@ -54,6 +75,16 @@ class TradingBot:
         self._mds_htf_low = float('inf')
         self._mds_htf_close = 0.0
         self._initialize_indicator()
+        # state machine
+        self.state = State.IDLE
+        # bind instance handlers for events
+        try:
+            subscribe("ENTRY_SIGNAL", lambda payload: asyncio.get_event_loop().call_soon_threadsafe(self._on_entry_signal_event, payload))
+            subscribe("EXIT_SIGNAL", lambda payload: asyncio.get_event_loop().call_soon_threadsafe(self._on_exit_signal_event, payload))
+        except Exception:
+            # non-async contexts will ignore subscriptions
+            pass
+
 
     def _prefetch_candles_needed(self) -> int:
         st_period = int(config.get('supertrend_period', 7) or 7)
@@ -396,6 +427,32 @@ class TradingBot:
         if not security_id.startswith('SIM_'):
             return False
 
+    # --- State machine helpers -------------------------------------------------
+    def set_state(self, new_state: State):
+        try:
+            old = getattr(self, 'state', None)
+            self.state = new_state
+            logger.info("State transition %s -> %s", old, new_state)
+        except Exception:
+            logger.exception("Failed to set state")
+
+    def _on_entry_signal_event(self, payload):
+        # Called when an ENTRY_SIGNAL is published by strategies
+        try:
+            self.set_state(State.SIGNAL_GENERATED)
+            # preserve last signal for downstream logic
+            self.last_signal = payload
+        except Exception:
+            logger.exception("Error handling ENTRY_SIGNAL")
+
+    def _on_exit_signal_event(self, payload):
+        try:
+            self.set_state(State.EXIT_PENDING)
+            self.last_signal = payload
+        except Exception:
+            logger.exception("Error handling EXIT_SIGNAL")
+
+
         index_name = str(self.current_position.get('index_name') or config.get('selected_index') or 'NIFTY')
         strike = int(self.current_position.get('strike') or 0)
         option_type = str(self.current_position.get('option_type') or '')
@@ -403,20 +460,14 @@ class TradingBot:
         if not (index_name and strike and option_type and expiry):
             return False
 
-        if not self.dhan:
-            try:
-                self.initialize_dhan()
-            except Exception:
-                pass
-        if not self.dhan:
-            return False
-
         try:
             provider = str(config.get('market_data_provider', 'dhan') or 'dhan').strip().lower()
             base_url = str(config.get('mds_base_url', '') or '').strip()
             live_security_id = None
+
+            # If MDS is configured, do NOT initialize or call Dhan for market data.
             if provider == 'mds' and base_url:
-                from mds_client import fetch_option_chain
+                from mds_client import fetch_option_chain, fetch_quote
                 oc_payload = await fetch_option_chain(base_url=base_url, symbol=index_name, expiry=expiry)
                 try:
                     oc = oc_payload.get('oc') if isinstance(oc_payload, dict) else oc_payload
@@ -437,18 +488,37 @@ class TradingBot:
                 except Exception:
                     live_security_id = None
             else:
+                # Only initialize Dhan when not using MDS as provider
+                if not self.dhan:
+                    try:
+                        # Only initialize if provider allows direct Dhan usage
+                        if provider != 'mds':
+                            self.initialize_dhan()
+                    except Exception:
+                        pass
+                if not self.dhan:
+                    return False
                 live_security_id = await self.dhan.get_atm_option_security_id(index_name, strike, option_type, expiry)
 
             if not live_security_id:
                 return False
 
-            option_ltp = await self.dhan.get_option_ltp(
-                security_id=live_security_id,
-                strike=strike,
-                option_type=option_type,
-                expiry=expiry,
-                index_name=index_name,
-            )
+            # Fetch option LTP via MDS when configured, otherwise via Dhan
+            if provider == 'mds' and base_url:
+                q = await fetch_quote(base_url=base_url, symbol=f"SEC_{live_security_id}")
+                option_ltp = None
+                try:
+                    option_ltp = float(q.get('ltp')) if isinstance(q, dict) and q.get('ltp') is not None else None
+                except Exception:
+                    option_ltp = None
+            else:
+                option_ltp = await self.dhan.get_option_ltp(
+                    security_id=live_security_id,
+                    strike=strike,
+                    option_type=option_type,
+                    expiry=expiry,
+                    index_name=index_name,
+                )
             if not option_ltp or float(option_ltp) <= 0:
                 return False
 
@@ -823,50 +893,24 @@ class TradingBot:
         exit_order_placed = False
         filled_exit_price = exit_price
 
-        if bot_state['mode'] != 'paper' and self.dhan and security_id:
-            existing_exit_order_id = self.current_position.get('exit_order_id')
-
+        if bot_state['mode'] != 'paper' and security_id:
+            # Delegate exit order placement to the execution layer via event bus
             try:
-                if not existing_exit_order_id:
-                    logger.info(f"[ORDER] Placing EXIT SELL order | Trade ID: {trade_id} | Security: {security_id} | Qty: {qty}")
-                    result = await self.dhan.place_order(security_id, "SELL", qty, index_name=index_name)
-
-                    if result.get('status') == 'success' and result.get('orderId'):
-                        existing_exit_order_id = result.get('orderId')
-                        self.current_position['exit_order_id'] = existing_exit_order_id
-                        bot_state['current_position'] = self.current_position
-                        exit_order_placed = True
-                        self.last_order_time_utc = datetime.now(timezone.utc)
-                        logger.info(f"[ORDER] ✓ EXIT order PLACED | OrderID: {existing_exit_order_id} | Security: {security_id} | Qty: {qty}")
-                    else:
-                        logger.error(f"[ORDER] ✗ EXIT order FAILED | Trade: {trade_id} | Result: {result}")
-                        return False
-
-                verify = await self.dhan.verify_order_filled(
-                    order_id=str(existing_exit_order_id),
-                    security_id=str(security_id),
-                    expected_qty=int(qty),
-                    timeout_seconds=30
-                )
-
-                if not verify.get('filled'):
-                    status = verify.get('status')
-                    logger.warning(
-                        f"[ORDER] ✗ EXIT not filled yet | Trade: {trade_id} | OrderID: {existing_exit_order_id} | Status: {status} | {verify.get('message')}"
-                    )
-                    if status in {"REJECTED", "CANCELLED", "ERROR"}:
-                        self.current_position.pop('exit_order_id', None)
-                        bot_state['current_position'] = self.current_position
-                    return False
-
-                avg_price = float(verify.get('average_price') or 0)
-                if avg_price > 0:
-                    filled_exit_price = round(avg_price / 0.05) * 0.05
-                    filled_exit_price = round(filled_exit_price, 2)
+                from event_bus import publish
+                payload = {
+                    'pos_id': trade_id,
+                    'security_id': security_id,
+                    'symbol': index_name,
+                    'qty': qty,
+                    'price': exit_price,
+                }
+                publish('EXIT_SIGNAL', payload)
                 exit_order_placed = True
-
+                # Track last order timestamp (treat as exit action)
+                self.last_order_time_utc = datetime.now(timezone.utc)
+                logger.info("[ORDER] Published EXIT_SIGNAL for %s qty=%s", security_id, qty)
             except Exception as e:
-                logger.error(f"[ORDER] ✗ Error placing/verifying EXIT order: {e} | Trade: {trade_id}", exc_info=True)
+                logger.error(f"[ORDER] ✗ Error publishing EXIT_SIGNAL: {e} | Trade: {trade_id}", exc_info=True)
                 return False
         elif not security_id:
             logger.warning(f"[WARNING] Cannot send exit order - security_id missing for {index_name} {option_type} | Trade: {trade_id}")
@@ -2132,40 +2176,31 @@ class TradingBot:
                 logger.error("[ERROR] Failed to get entry price: %s", e)
                 return
             
-            result = await self.dhan.place_order(security_id, "BUY", qty, index_name=index_name)
-            logger.info(f"[ORDER] Entry order result: {result}")
-            
-            # Check if order was successfully placed
-            if result.get('status') != 'success' or not result.get('orderId'):
-                logger.error(f"[ERROR] Failed to place entry order: {result}")
+            # Delegate entry order placement to the execution layer via event bus
+            try:
+                from event_bus import publish
+                payload = {
+                    'pos_id': trade_id,
+                    'symbol': index_name,
+                    'security_id': security_id,
+                    'strike': strike,
+                    'option_type': option_type,
+                    'expiry': expiry,
+                    'qty': qty,
+                    'price': entry_price,
+                }
+                publish('ENTRY_SIGNAL', payload)
+                logger.info("[ORDER] Published ENTRY_SIGNAL %s", {k: payload.get(k) for k in ('pos_id','security_id','qty')})
+                # Track last order timestamp (entry order)
+                self.last_order_time_utc = datetime.now(timezone.utc)
+                # Transition state to ORDER_PLACED
+                try:
+                    self.set_state(State.ORDER_PLACED)
+                except Exception:
+                    pass
+            except Exception as e:
+                logger.error("[ORDER] ✗ Error publishing ENTRY_SIGNAL: %s", e)
                 return
-            
-            # Order placed successfully - save to DB immediately
-            order_id = result.get('orderId')
-
-            # Track last order timestamp (entry order) right after placing the order
-            self.last_order_time_utc = datetime.now(timezone.utc)
-
-            verify = await self.dhan.verify_order_filled(
-                order_id=str(order_id),
-                security_id=str(security_id),
-                expected_qty=int(qty),
-                timeout_seconds=30
-            )
-            if not verify.get('filled'):
-                logger.error(
-                    f"[ORDER] ✗ Entry order NOT filled | OrderID: {order_id} | Status: {verify.get('status')} | {verify.get('message')}"
-                )
-                return
-
-            avg_price = float(verify.get('average_price') or 0)
-            if avg_price > 0:
-                entry_price = round(avg_price / 0.05) * 0.05
-                entry_price = round(entry_price, 2)
-            
-            logger.info(
-                f"[ENTRY] LIVE | {index_name} {option_type} {strike} | Expiry: {expiry} | OrderID: {order_id} | Fill Price: {entry_price} | Qty: {qty}"
-            )
 
         # Track last order timestamp (paper mode entry)
         if bot_state['mode'] == 'paper':

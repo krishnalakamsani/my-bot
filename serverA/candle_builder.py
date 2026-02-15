@@ -1,7 +1,9 @@
 import os
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
+import signal
+from collections import defaultdict
 
 import redis
 import psycopg2
@@ -89,6 +91,22 @@ def main():
     # Track open candles per symbol
     current_candles: dict[str, Candle] = {}
 
+    def _persist_all_and_exit(signum=None, frame=None):
+        logging.info("Signal received (%s). Persisting open candles...", signum)
+        try:
+            for sym, c in current_candles.items():
+                try:
+                    persist_candle(sym, c)
+                except Exception:
+                    logging.exception("Error persisting candle for %s", sym)
+        except Exception:
+            logging.exception("Error during shutdown persist")
+        finally:
+            raise SystemExit(0)
+
+    signal.signal(signal.SIGINT, _persist_all_and_exit)
+    signal.signal(signal.SIGTERM, _persist_all_and_exit)
+
     for msg in pubsub.listen():
         try:
             if msg.get("type") not in ("message", "pmessage"):
@@ -101,11 +119,11 @@ def main():
 
             # when pmessage, 'data' is message and 'pattern' present
             data_raw = msg.get("data")
-            if isinstance(data_raw, (bytes, str)):
-                try:
-                    data = json.loads(data_raw)
-                except Exception:
-                    data = {}
+                    if isinstance(data_raw, (bytes, str)):
+                        try:
+                            data = json.loads(data_raw)
+                        except Exception:
+                            data = {}
             else:
                 data = data_raw or {}
 
@@ -118,11 +136,14 @@ def main():
             ltp = float((data.get('ltp') or 0) or 0)
             ts = data.get('ts')
             if ts:
-                tick_time = datetime.fromtimestamp(float(ts))
+                # ensure UTC alignment
+                try:
+                    epoch = int(float(ts))
+                    minute = datetime.utcfromtimestamp((epoch // 60) * 60)
+                except Exception:
+                    minute = datetime.utcnow().replace(second=0, microsecond=0)
             else:
-                tick_time = datetime.utcnow()
-
-            minute = tick_time.replace(second=0, microsecond=0)
+                minute = datetime.utcnow().replace(second=0, microsecond=0)
 
             current = current_candles.get(symbol)
             if current is None:
