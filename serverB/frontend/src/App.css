@@ -1,0 +1,130 @@
+/* NiftyAlgo Terminal - Custom Styles */
+
+/* Grid Layout Responsive */
+@media (min-width: 1024px) {
+  .bento-grid {
+    grid-template-rows: auto 1fr;
+  }
+}
+
+/* Card hover effect */
+.terminal-card {
+  transition: border-color 0.2s ease;
+}
+
+.terminal-card:hover {
+  border-color: #d1d5db;
+}
+
+/* Button styles */
+.btn-active {
+  transition: transform 0.1s ease, background-color 0.2s ease;
+}
+
+.btn-active:active:not(:disabled) {
+  transform: scale(0.95);
+}
+
+/* Status badge animation */
+.status-badge {
+  transition: all 0.2s ease;
+}
+
+/* Scrollbar for log container */
+.log-container::-webkit-scrollbar {
+  width: 4px;
+}
+
+.log-container::-webkit-scrollbar-track {
+  background: #f1f5f9;
+}
+
+.log-container::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 2px;
+}
+
+/* Table row transition */
+.terminal-table tbody tr {
+  transition: background-color 0.15s ease;
+}
+
+/* Chart container */
+.recharts-wrapper {
+  font-family: 'JetBrains Mono', monospace !important;
+}
+
+/* Input focus state */
+input:focus {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.2);
+}
+
+/* Dialog overlay */
+[data-state="open"] > [data-radix-dialog-overlay] {
+  background-color: rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(2px);
+}
+
+/* Select dropdown */
+[data-radix-select-content] {
+  border-radius: 2px;
+}
+
+/* Switch styling */
+[data-state="checked"] {
+  background-color: #2563eb;
+}
+
+/* Progress bar animation */
+@keyframes progress-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
+/* Skeleton loading */
+.skeleton {
+  animation: skeleton-pulse 1.5s ease-in-out infinite;
+  background: linear-gradient(90deg, #f1f5f9 25%, #e2e8f0 50%, #f1f5f9 75%);
+  background-size: 200% 100%;
+}
+
+@keyframes skeleton-pulse {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* Custom tooltip */
+.custom-tooltip {
+  background: white;
+  border: 1px solid #e5e7eb;
+  padding: 8px 12px;
+  border-radius: 2px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+/* Mobile adjustments */
+@media (max-width: 768px) {
+  .terminal-card-header {
+    padding: 12px;
+  }
+  
+  .label-text {
+    font-size: 9px;
+  }
+  
+  .value-text {
+    font-size: 16px;
+  }
+}
+
+/* Print styles */
+@media print {
+  .terminal-card {
+    break-inside: avoid;
+  }
+  
+  button, .no-print {
+    display: none !important;
+  }
+}

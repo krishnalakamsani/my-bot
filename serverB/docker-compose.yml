@@ -1,0 +1,95 @@
+version: "3.9"
+
+services:
+  backend:
+    build: .
+    container_name: trading_backend
+    command: uvicorn server:app --host 0.0.0.0 --port 8000
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PASSWORD_FILE=/run/secrets/redis_password
+      - DHAN_CLIENT_ID_FILE=/run/secrets/dhan_client_id
+      - DHAN_ACCESS_TOKEN_FILE=/run/secrets/dhan_access_token
+      - POSTGRES_HOST=postgres
+      - POSTGRES_DB=${POSTGRES_DB:-trades}
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password
+      - MDS_BASE_URL=${MDS_BASE_URL:-}
+    secrets:
+      - redis_password
+      - dhan_client_id
+      - dhan_access_token
+      - postgres_password
+    depends_on:
+      - postgres
+      - redis
+    expose:
+      - "8000"
+
+  frontend:
+    build: ./frontend
+    container_name: trading_frontend
+    environment:
+      - REACT_APP_API_BASE_URL=${FRONTEND_API_BASE_URL:-http://backend:8000}
+    depends_on:
+      - backend
+    ports:
+      - "3000:80"
+
+  execution_api:
+    build: .
+    container_name: trading_execution_api
+    command: uvicorn execution_api:app --host 0.0.0.0 --port 8003
+    environment:
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password
+    secrets:
+      - postgres_password
+    expose:
+      - "8003"
+    depends_on:
+      - postgres
+
+  postgres:
+    image: postgres:15
+    container_name: trading_postgres
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-trades}
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    secrets:
+      - postgres_password
+
+  redis:
+    image: redis:7
+    container_name: trading_redis
+    command: ["sh", "-c", "redis-server --save '' --appendonly no --requirepass \ $(cat /run/secrets/redis_password)"]
+    secrets:
+      - redis_password
+    expose:
+      - "6379"
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \ $(cat /run/secrets/redis_password) ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+
+secrets:
+  redis_password:
+    file: ./secrets/redis_password.txt
+  postgres_password:
+    file: ./secrets/postgres_password.txt
+  dhan_client_id:
+    file: ./secrets/dhan_client_id.txt
+  dhan_access_token:
+    file: ./secrets/dhan_access_token.txt

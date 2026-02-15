@@ -1,0 +1,206 @@
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&family=Manrope:wght@500;600;700;800&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+    :root {
+        --background: 0 0% 100%;
+        --foreground: 222.2 84% 4.9%;
+        --card: 0 0% 100%;
+        --card-foreground: 222.2 84% 4.9%;
+        --popover: 0 0% 100%;
+        --popover-foreground: 222.2 84% 4.9%;
+        --primary: 221.2 83.2% 53.3%;
+        --primary-foreground: 210 40% 98%;
+        --secondary: 210 40% 96.1%;
+        --secondary-foreground: 222.2 47.4% 11.2%;
+        --muted: 210 40% 96.1%;
+        --muted-foreground: 215.4 16.3% 46.9%;
+        --accent: 210 40% 96.1%;
+        --accent-foreground: 222.2 47.4% 11.2%;
+        --destructive: 0 84.2% 60.2%;
+        --destructive-foreground: 210 40% 98%;
+        --border: 214.3 31.8% 91.4%;
+        --input: 214.3 31.8% 91.4%;
+        --ring: 221.2 83.2% 53.3%;
+        --radius: 0.125rem;
+
+        --success: 160 84% 39%;
+        --success-foreground: 0 0% 100%;
+        --warning: 38 92% 50%;
+        --warning-foreground: 0 0% 100%;
+    }
+
+    * {
+        @apply border-border;
+    }
+
+    body {
+        @apply bg-background text-foreground;
+        font-family: 'IBM Plex Sans', sans-serif;
+    }
+
+    h1, h2, h3, h4, h5, h6 {
+        font-family: 'Manrope', sans-serif;
+    }
+
+    .font-mono, code, pre, .mono-text {
+        font-family: 'JetBrains Mono', monospace;
+    }
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+
+::-webkit-scrollbar-track {
+    background: #f1f5f9;
+}
+
+::-webkit-scrollbar-thumb {
+    background: #cbd5e1;
+    border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: #94a3b8;
+}
+
+/* Flash animations for live data */
+@keyframes flash-green {
+    0%, 100% { background-color: transparent; }
+    50% { background-color: rgba(5, 150, 105, 0.2); }
+}
+
+@keyframes flash-red {
+    0%, 100% { background-color: transparent; }
+    50% { background-color: rgba(220, 38, 38, 0.2); }
+}
+
+.flash-green {
+    animation: flash-green 0.3s ease-out;
+}
+
+.flash-red {
+    animation: flash-red 0.3s ease-out;
+}
+
+/* Pulsing dot for live status */
+@keyframes pulse-dot {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.5; transform: scale(1.2); }
+}
+
+.pulse-dot {
+    animation: pulse-dot 1.5s ease-in-out infinite;
+}
+
+/* Label styling */
+.label-text {
+    @apply text-[10px] uppercase tracking-wider text-gray-500 font-bold;
+}
+
+/* Value styling */
+.value-text {
+    font-family: 'JetBrains Mono', monospace;
+    @apply text-lg font-medium tracking-tight;
+}
+
+.value-positive {
+    @apply text-emerald-600;
+}
+
+.value-negative {
+    @apply text-red-600;
+}
+
+/* Card styles */
+.terminal-card {
+    @apply bg-white border border-gray-200 rounded-sm overflow-hidden;
+}
+
+.terminal-card-header {
+    @apply px-4 py-3 border-b border-gray-100 bg-gray-50/50 flex justify-between items-center;
+}
+
+/* Status badges */
+.status-badge {
+    @apply inline-flex items-center gap-1.5 px-2 py-1 text-xs font-medium rounded-sm border;
+}
+
+.status-running {
+    @apply bg-emerald-50 text-emerald-700 border-emerald-200;
+}
+
+.status-stopped {
+    @apply bg-gray-100 text-gray-700 border-gray-200;
+}
+
+.status-error {
+    @apply bg-red-50 text-red-700 border-red-200;
+}
+
+/* Log viewer */
+.log-container {
+    font-family: 'JetBrains Mono', monospace;
+    @apply text-xs bg-gray-50 border border-gray-200 rounded-sm overflow-y-auto p-2;
+}
+
+.log-entry {
+    @apply py-0.5 border-b border-gray-100 last:border-0;
+}
+
+.log-info {
+    @apply text-blue-600;
+}
+
+.log-warn {
+    @apply text-amber-600;
+}
+
+.log-error {
+    @apply text-red-600;
+}
+
+/* Table styles */
+.terminal-table {
+    @apply w-full text-sm;
+}
+
+.terminal-table thead {
+    @apply bg-gray-50;
+}
+
+.terminal-table th {
+    @apply text-xs uppercase text-gray-500 font-semibold tracking-wider px-4 py-2 text-left;
+}
+
+.terminal-table td {
+    @apply px-4 py-2 border-b border-gray-100;
+}
+
+.terminal-table tbody tr {
+    @apply hover:bg-gray-50/50 transition-colors;
+}
+
+/* Button active state */
+.btn-active {
+    @apply active:scale-95 transition-transform duration-100;
+}
+
+/* Bento grid layout */
+.bento-grid {
+    display: grid;
+    grid-template-columns: repeat(12, 1fr);
+    gap: 1rem;
+}
+
+@media (max-width: 1024px) {
+    .bento-grid {
+        grid-template-columns: 1fr;
+    }
+}

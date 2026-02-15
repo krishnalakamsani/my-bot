@@ -1,0 +1,130 @@
+{
+  "design_system": {
+    "identity": {
+      "name": "NiftyAlgo Terminal",
+      "archetype": "Swiss & High-Contrast",
+      "vibe": "Professional, Precise, Institutional",
+      "theme_mode": "light"
+    },
+    "typography": {
+      "font_family": {
+        "headings": "Manrope, sans-serif",
+        "body": "IBM Plex Sans, sans-serif",
+        "mono": "JetBrains Mono, monospace"
+      },
+      "scale": {
+        "h1": "text-3xl font-bold tracking-tight text-gray-900",
+        "h2": "text-xl font-semibold tracking-tight text-gray-900",
+        "h3": "text-lg font-medium text-gray-900",
+        "body": "text-sm text-gray-600 leading-relaxed",
+        "mono_lg": "font-mono text-lg tracking-tight",
+        "mono_sm": "font-mono text-xs text-gray-500"
+      },
+      "rules": [
+        "Use Manrope for all section headers and metric labels.",
+        "Use JetBrains Mono for ALL numerical data (prices, PnL, timestamps) and log outputs.",
+        "Use IBM Plex Sans for general UI text and settings descriptions.",
+        "Headings must be tight: tracking-tight.",
+        "Labels must be uppercase and small: text-[10px] uppercase tracking-wider text-gray-500 font-bold."
+      ]
+    },
+    "colors": {
+      "palette": {
+        "background": "#FFFFFF",
+        "surface": "#F9FAFB",
+        "surface_highlight": "#F3F4F6",
+        "border": "#E5E7EB",
+        "text_primary": "#111827",
+        "text_secondary": "#6B7280",
+        "primary": "#2563EB",
+        "primary_hover": "#1D4ED8",
+        "success": "#059669",
+        "success_bg": "#ECFDF5",
+        "danger": "#DC2626",
+        "danger_bg": "#FEF2F2",
+        "warning": "#D97706",
+        "warning_bg": "#FFFBEB",
+        "neutral": "#4B5563"
+      },
+      "usage": {
+        "body_bg": "bg-white",
+        "card_bg": "bg-white",
+        "sidebar_bg": "bg-gray-50 border-r border-gray-200",
+        "header_bg": "bg-white/80 backdrop-blur-md border-b border-gray-200",
+        "positive_value": "text-emerald-600 font-medium",
+        "negative_value": "text-red-600 font-medium",
+        "neutral_value": "text-gray-900",
+        "status_running": "bg-emerald-100 text-emerald-700 border-emerald-200",
+        "status_stopped": "bg-gray-100 text-gray-700 border-gray-200",
+        "status_error": "bg-red-100 text-red-700 border-red-200"
+      }
+    },
+    "layout": {
+      "grid_system": "Bento Grid Mode B (High Density)",
+      "spacing": {
+        "container_padding": "p-6",
+        "item_gap": "gap-4",
+        "internal_padding": "p-4"
+      },
+      "structure": [
+        "Top Bar: Global Status (Bot State, Market Status, Connection) + Theme Toggle",
+        "Main Grid (12 cols):",
+        "  - Left Col (3 cols): Live Position Panel (PnL, SL) + Controls",
+        "  - Mid Col (6 cols): Nifty Spot Chart/Tracker + Trades Table",
+        "  - Right Col (3 cols): Daily Summary + Logs + Settings"
+      ]
+    },
+    "components": {
+      "style_guide": {
+        "radius": "rounded-sm",
+        "shadows": "none",
+        "borders": "border border-gray-200",
+        "buttons": "font-medium text-sm h-9 px-4 rounded-sm transition-all active:scale-95",
+        "inputs": "h-9 rounded-sm border-gray-300 focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
+      },
+      "specifics": {
+        "cards": "bg-white border border-gray-200 rounded-sm p-0 overflow-hidden",
+        "card_header": "px-4 py-3 border-b border-gray-100 bg-gray-50/50 flex justify-between items-center",
+        "tables": "w-full text-sm text-left",
+        "table_header": "bg-gray-50 text-xs uppercase text-gray-500 font-semibold tracking-wider",
+        "table_row": "border-b border-gray-100 hover:bg-gray-50/50 transition-colors",
+        "logs_container": "font-mono text-xs bg-gray-50 border border-gray-200 rounded-sm h-[300px] overflow-y-auto p-2"
+      }
+    },
+    "visual_enhancers": {
+      "surface_strategy": "Grid Borders (The Technical Look)",
+      "micro_interactions": [
+        "Live data updates must flash background color (green/red) briefly.",
+        "Buttons must have active state scale reduction.",
+        "Hover states on table rows."
+      ],
+      "decorations": [
+        "Use 1px borders to define hierarchy.",
+        "Avoid drop shadows. Use borders for separation.",
+        "Use subtle striped backgrounds for charts or empty states."
+      ]
+    }
+  },
+  "image_urls": {
+    "app_logo": "https://images.unsplash.com/photo-1765551097125-7b63cc19db13?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxODF8MHwxfHNlYXJjaHwyfHxtaW5pbWFsaXN0JTIwYWJzdHJhY3QlMjB0ZWNoJTIwbG9nbyUyMGJsdWV8ZW58MHx8fHwxNzY4Nzk3MzcwfDA&ixlib=rb-4.1.0&q=85",
+    "user_avatar": "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=100&h=100"
+  },
+  "instructions_to_main_agent": [
+    "INSTALL DEPENDENCIES: npm install lucide-react recharts clsx tailwind-merge @radix-ui/react-slot @radix-ui/react-switch @radix-ui/react-dialog @radix-ui/react-label @radix-ui/react-select @radix-ui/react-scroll-area",
+    "SETUP FONTS: Add Manrope, IBM Plex Sans, and JetBrains Mono via Google Fonts in index.html or CSS import.",
+    "THEME ENFORCEMENT: Force LIGHT MODE by default. Do not rely on system preference. Hardcode 'light' class in html/body if needed, but allow toggle.",
+    "LAYOUT: Implement the 'Bento Grid Mode B'. Use CSS Grid. Ensure the dashboard fills the screen height (h-screen) with internal scrolling for panels.",
+    "DATA VISUALIZATION: Use Recharts for the Nifty Spot tracker. Keep it minimal - sparklines or simple area charts. No complex heavy charts.",
+    "LOGS: The logs viewer must auto-scroll to bottom. Use a monospace font.",
+    "API CREDENTIALS: The 'Update Dhan Token' feature should be a secure input in a Settings Dialog or a dedicated card. Mask the token by default.",
+    "STATE INDICATORS: Use a 'pulsing' dot for the Live Bot Status (Green = Running, Gray = Stopped).",
+    "TESTING: Add data-testid to all buttons (start-bot-btn, stop-bot-btn) and key metric displays (total-pnl, nifty-ltp)."
+  ],
+  "universal_guidelines": [
+    "Do not use gradients for backgrounds. Keep it flat and clean.",
+    "Use 'border-collapse' look for grids.",
+    "Ensure high contrast for all text (WCAG AA).",
+    "Micro-animations: 200ms ease-out transitions.",
+    "No generic 'Inter' font. Use the specified font stack."
+  ]
+}

@@ -1,0 +1,91 @@
+version: "3.9"
+
+services:
+  redis:
+    image: redis:7
+    expose:
+      - "6379"
+    command: ["/bin/sh","-c","redis-server --requirepass $(cat /run/secrets/redis_password)"]
+    secrets:
+      - redis_password
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "$(cat /run/secrets/redis_password)", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  postgres:
+    image: postgres:15
+    expose:
+      - "5432"
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-candles}
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    secrets:
+      - postgres_password
+
+  feed:
+    build: .
+    environment:
+      - DHAN_CLIENT_ID_FILE=/run/secrets/dhan_client_id
+      - DHAN_ACCESS_TOKEN_FILE=/run/secrets/dhan_access_token
+      - REDIS_PASSWORD_FILE=/run/secrets/redis_password
+    secrets:
+      - redis_password
+      - dhan_client_id
+      - dhan_access_token
+    depends_on:
+      - redis
+
+  candle_builder:
+    build: .
+    command: python candle_builder.py
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PASSWORD_FILE=/run/secrets/redis_password
+      - POSTGRES_HOST=postgres
+      - POSTGRES_DB=${POSTGRES_DB:-candles}
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+    secrets:
+      - redis_password
+      - postgres_password
+    depends_on:
+      - redis
+      - postgres
+
+  market_data:
+    build: .
+    command: uvicorn market_data_service:app --host 0.0.0.0 --port 8002
+    environment:
+      - POSTGRES_HOST=postgres
+      - POSTGRES_DB=${POSTGRES_DB:-candles}
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+    secrets:
+      - postgres_password
+    expose:
+      - "8002"
+    depends_on:
+      - postgres
+
+volumes:
+  postgres_data:
+
+secrets:
+  redis_password:
+    file: ./secrets/redis_password.txt
+  postgres_password:
+    file: ./secrets/postgres_password.txt
+  dhan_client_id:
+    file: ./secrets/dhan_client_id.txt
+  dhan_access_token:
+    file: ./secrets/dhan_access_token.txt
