@@ -185,6 +185,13 @@ config = {
 
     # Trading control
     "trading_enabled": True,  # If False: no new entries, but indicators/updates continue
+
+    # ScoreMDS normalized thresholds (0..1 for entry/exit scores)
+    "mds_entry_score_min": _env_float("MDS_ENTRY_SCORE_MIN", 0.25),
+    "mds_exit_score_min": _env_float("MDS_EXIT_SCORE_MIN", 0.20),
+    "mds_entry_slope_min": _env_float("MDS_ENTRY_SLOPE_MIN", 0.2),
+    "mds_exit_slope_min": _env_float("MDS_EXIT_SLOPE_MIN", 0.1),
+    "mds_confirm_needed": _env_int("MDS_CONFIRM_NEEDED", 2),
 }
 
 # SQLite Database path

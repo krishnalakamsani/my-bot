@@ -54,6 +54,8 @@ class MDSnapshot:
     acceleration: float
     stability: float
     confidence: float
+    entry_score: float
+    exit_score: float
     is_choppy: bool
     direction: str  # 'CE' | 'PE' | 'NONE'
     tf_scores: Dict[int, TFScore]
@@ -142,6 +144,11 @@ class ScoreEngine:
         self.score_smoothing_alpha = float(bonus_macd_cross or 0.4) if False else 0.4
         self._score_ewma: Optional[float] = None
 
+        # Conflict reduction: when timeframes disagree, reduce contribution
+        # of the weaker timeframe to avoid flip-flopping on TF noise.
+        # Value in [0,1] representing fraction to reduce (0.6 => reduce 60%).
+        self.conflict_reduction_factor = 0.6
+
         # Persist last computed TFScore per timeframe so higher-TF contribution remains
         # stable between its candle completions.
         self._last_scores: Dict[int, TFScore] = {}
@@ -202,9 +209,35 @@ class ScoreEngine:
         # Compute total score using the freshest TF scores available: prefer
         # the scores computed this tick (including a partial peek), otherwise
         # fall back to the last persisted TF score.
-        total_score = 0.0
+        # Prepare per-TF weighted scores (use last persisted when missing)
+        per_tf_weighted: Dict[int, float] = {}
         for tf in self.timeframes:
-            total_score += (tf_scores.get(tf) or self._last_tf_score(tf)).weighted_score
+            per_tf_weighted[tf] = (tf_scores.get(tf) or self._last_tf_score(tf)).weighted_score
+
+        # Multi-timeframe conflict reduction (pairwise for base -> next tf)
+        # If the lower timeframe disagrees in sign with the higher timeframe,
+        # reduce the lower timeframe contribution by the configured factor
+        try:
+            base_tf, next_tf = self.timeframes
+            w_base = per_tf_weighted.get(base_tf, 0.0)
+            w_next = per_tf_weighted.get(next_tf, 0.0)
+            if w_base != 0 and w_next != 0 and (w_base > 0) != (w_next > 0):
+                # They disagree in sign. Reduce the smaller-magnitude contributor.
+                if abs(w_base) < abs(w_next):
+                    per_tf_weighted[base_tf] = w_base * (1.0 - float(self.conflict_reduction_factor))
+                else:
+                    per_tf_weighted[next_tf] = w_next * (1.0 - float(self.conflict_reduction_factor))
+        except Exception:
+            pass
+
+        total_score = sum(per_tf_weighted.values())
+
+        # Normalize total score to [-1, 1] by dividing by maximum possible weighted score
+        max_possible_total = self._max_tf_raw * sum(self.tf_weights.values())
+        if max_possible_total <= 0:
+            normalized_total = 0.0
+        else:
+            normalized_total = max(-1.0, min(1.0, float(total_score) / float(max_possible_total)))
 
         # Apply EWMA smoothing to reduce volatile tick-to-tick changes.
         alpha = max(0.0, min(1.0, getattr(self, 'score_smoothing_alpha', 0.4)))
@@ -234,6 +267,9 @@ class ScoreEngine:
 
         # Always expose latest known TF scores for both timeframes
         snapshot_tf_scores = {tf: self._last_tf_score(tf) for tf in self.timeframes}
+        # Split normalized_total into entry/exit scores in [0,1]
+        entry_score = round(max(0.0, normalized_total), 3)
+        exit_score = round(max(0.0, -normalized_total), 3)
 
         return MDSnapshot(
             score=round(smoothed_score, 3),
@@ -241,6 +277,8 @@ class ScoreEngine:
             acceleration=round(acceleration, 3),
             stability=round(stability, 3),
             confidence=round(confidence, 3),
+            entry_score=entry_score,
+            exit_score=exit_score,
             is_choppy=bool(is_choppy),
             direction=direction,
             tf_scores={k: v for k, v in sorted(snapshot_tf_scores.items())},
@@ -520,6 +558,8 @@ class ScoreEngine:
             acceleration=0.0,
             stability=0.0,
             confidence=0.0,
+            entry_score=0.0,
+            exit_score=0.0,
             is_choppy=False,
             direction="NONE",
             tf_scores=tf_scores,

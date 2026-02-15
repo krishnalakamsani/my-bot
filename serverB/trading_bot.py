@@ -81,6 +81,7 @@ class TradingBot:
         try:
             subscribe("ENTRY_SIGNAL", lambda payload: asyncio.get_event_loop().call_soon_threadsafe(self._on_entry_signal_event, payload))
             subscribe("EXIT_SIGNAL", lambda payload: asyncio.get_event_loop().call_soon_threadsafe(self._on_exit_signal_event, payload))
+            subscribe("ORDER_FILLED", lambda payload: asyncio.get_event_loop().call_soon_threadsafe(self._on_order_filled_event, payload))
         except Exception:
             # non-async contexts will ignore subscriptions
             pass
@@ -444,6 +445,63 @@ class TradingBot:
             self.last_signal = payload
         except Exception:
             logger.exception("Error handling ENTRY_SIGNAL")
+
+
+    def _on_order_filled_event(self, payload):
+        try:
+            if not payload:
+                return
+            # payload expected to contain pos_id/trade_id, filled_price, filled_qty, security_id, symbol
+            trade_id = payload.get('pos_id') or payload.get('trade_id') or payload.get('db_id')
+            filled_price = payload.get('filled_price') or payload.get('price')
+            filled_qty = int(payload.get('filled_qty') or payload.get('qty') or 0)
+            security_id = payload.get('security_id') or ''
+            symbol = payload.get('symbol') or config.get('selected_index')
+
+            # Build current_position record (keep minimal keys used elsewhere)
+            pos = {
+                'trade_id': trade_id,
+                'pos_id': trade_id,
+                'security_id': str(security_id),
+                'symbol': symbol,
+                'qty': filled_qty,
+            }
+
+            # Update bot state
+            self.current_position = pos
+            try:
+                bot_state['current_position'] = pos
+            except Exception:
+                pass
+
+            if filled_price:
+                try:
+                    self.entry_price = float(filled_price)
+                    bot_state['entry_price'] = float(filled_price)
+                except Exception:
+                    pass
+
+            self.entry_time_utc = datetime.now(timezone.utc)
+            try:
+                bot_state['trading_enabled'] = bool(config.get('trading_enabled', True))
+            except Exception:
+                pass
+
+            # Increment daily trade counter
+            try:
+                bot_state['daily_trades'] = int(bot_state.get('daily_trades', 0)) + 1
+            except Exception:
+                pass
+
+            # Transition to POSITION_OPEN
+            try:
+                self.set_state(State.POSITION_OPEN)
+            except Exception:
+                pass
+
+            logger.info(f"[ORDER] ORDER_FILLED processed | Trade={trade_id} Sec={security_id} Price={filled_price} Qty={filled_qty}")
+        except Exception:
+            logger.exception("Error handling ORDER_FILLED event")
 
     def _on_exit_signal_event(self, payload):
         try:
@@ -1558,7 +1616,8 @@ class TradingBot:
             if self._min_hold_active():
                 return False
 
-            score = float(getattr(mds_snapshot, 'score', 0.0) or 0.0)
+            # Use normalized entry/exit scores produced by ScoreEngine
+            score = float(getattr(mds_snapshot, 'entry_score', 0.0) or 0.0)
             slope = float(getattr(mds_snapshot, 'slope', 0.0) or 0.0)
 
             # Use slow timeframe MACD+Histogram as a confirmation signal for exits.
@@ -1573,7 +1632,9 @@ class TradingBot:
             except Exception:
                 slow_mom = 0.0
 
-            exit_decision = runner.decide_exit(position_type=str(position_type or ''), score=score, slope=slope, slow_mom=slow_mom)
+            # For exits prefer the exit_score (normalized inverse of entry)
+            exit_score = float(getattr(mds_snapshot, 'exit_score', 0.0) or 0.0)
+            exit_decision = runner.decide_exit(position_type=str(position_type or ''), score=exit_score, slope=slope, slow_mom=slow_mom)
             if exit_decision.should_exit:
                 exit_price = bot_state['current_option_ltp']
                 pnl = (exit_price - self.entry_price) * qty
@@ -1612,7 +1673,8 @@ class TradingBot:
                 return False
 
         direction = str(getattr(mds_snapshot, 'direction', 'NONE') or 'NONE')
-        score = float(getattr(mds_snapshot, 'score', 0.0) or 0.0)
+        # Use entry_score for entry decisions
+        score = float(getattr(mds_snapshot, 'entry_score', 0.0) or 0.0)
         slope = float(getattr(mds_snapshot, 'slope', 0.0) or 0.0)
         confidence = float(getattr(mds_snapshot, 'confidence', 0.0) or 0.0)
 

@@ -41,6 +41,7 @@ class ScoreMdsRunner:
         self._confirm_count = 0
 
     def decide_exit(self, *, position_type: str, score: float, slope: float, slow_mom: float) -> StrategyExitDecision:
+        # score is expected to be normalized exit_score (0..1)
         d = decide_exit_mds(
             position_type=str(position_type or ""),
             score=float(score or 0.0),
@@ -71,15 +72,12 @@ class ScoreMdsRunner:
             self._confirm_count = 0
             return StrategyEntryDecision(False, "", "neutral_band")
 
-        # Select thresholds based on legacy vs tuned config
-        if bool(config.get('use_legacy_thresholds', False)):
-            score_min = 10.0
-            slope_min = 1.0
-        else:
-            score_min = 12.0
-            slope_min = 1.5
+        # Use normalized thresholds from config (scores expected in 0..1)
+        score_min = float(config.get('mds_entry_score_min', 0.25) or 0.25)
+        slope_min = float(config.get('mds_entry_slope_min', 0.2) or 0.2)
+        confirm_needed_cfg = int(config.get('mds_confirm_needed', 2) or 2)
 
-        if abs(float(score or 0.0)) < float(score_min):
+        if float(score or 0.0) < float(score_min):
             self._last_direction = direction
             self._confirm_count = 0
             return StrategyEntryDecision(False, "", "score_too_low")
@@ -102,7 +100,7 @@ class ScoreMdsRunner:
             score=float(score or 0.0),
             slope=float(slope or 0.0),
             confirm_count=int(self._confirm_count),
-            confirm_needed=int(confirm_needed or 0),
+            confirm_needed=int(confirm_needed_cfg or 0),
         )
 
         return StrategyEntryDecision(
@@ -110,5 +108,5 @@ class ScoreMdsRunner:
             str(d.option_type or ""),
             str(d.reason or ""),
             confirm_count=int(self._confirm_count),
-            confirm_needed=int(confirm_needed or 0),
+            confirm_needed=int(confirm_needed_cfg or 0),
         )
