@@ -47,10 +47,10 @@ Quick overview
   ```mermaid
   flowchart LR
     subgraph ServerA[Server A - Market Data Service]
-      Feed[Feed Service\n(Dhan SDK)]
+      Feed["Feed Service<br/>(Dhan SDK)"]
       RedisA[Redis]
-      PgM[Postgres\n(candles & option_chains)]
-      Adapter[MDS Adapter\n(HTTP API)]
+      PgM["Postgres<br/>(candles & option_chains)"]
+      Adapter["MDS Adapter<br/>(HTTP API)"]
       Feed --> RedisA
       Feed --> PgM
       RedisA --> Adapter
@@ -58,8 +58,8 @@ Quick overview
     end
 
     subgraph ServerB[Server B - Trading Bot]
-      Backend[Backend\n(uvicorn)]
-      Frontend[Frontend\n(React)]
+      Backend["Backend<br/>(uvicorn)"]
+      Frontend["Frontend<br/>(React)"]
       Exec[Execution API]
       Backend --> Frontend
       Backend --> Exec
