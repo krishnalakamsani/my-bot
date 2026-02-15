@@ -1,0 +1,6 @@
+# Ignore secret files and env
+serverA/secrets/
+serverB/secrets/
+secrets/
+*.txt
+.env

@@ -4,7 +4,10 @@ from datetime import datetime
 
 import psycopg2
 import json
-from dhanhq import DhanContext
+try:
+    from dhan_api import DhanAPI
+except Exception:
+    DhanAPI = None
 
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s %(message)s")
 
@@ -66,22 +69,38 @@ def place_order(side, security_id, quantity, order_type="MARKET", price=None):
         logging.info("SIMULATE=true — not placing real order")
         record_trade(side, quantity, price or 0, status="simulated", info={"security_id": security_id})
         return {"status": "simulated"}
-
     if not DHAN_CLIENT_ID or not DHAN_ACCESS_TOKEN:
         logging.error("Dhan credentials missing; cannot place live order")
         return None
 
+    # Prefer the DhanAPI wrapper if available (keeps SDK usage isolated)
     try:
-        client = DhanContext(client_id=DHAN_CLIENT_ID, access_token=DHAN_ACCESS_TOKEN)
-        res = client.place_order(
-            security_id=security_id,
-            exch_seg="NSE",
-            transaction_type=side,
-            quantity=quantity,
-            order_type=order_type,
-            price=price,
-            product_type="INTRADAY",
-        )
+        if DhanAPI is not None:
+            client = DhanAPI(DHAN_ACCESS_TOKEN, DHAN_CLIENT_ID)
+            res = client.dhan.place_order(
+                security_id=security_id,
+                exch_seg="NSE",
+                transaction_type=side,
+                quantity=quantity,
+                order_type=order_type,
+                price=price,
+                product_type="INTRADAY",
+            )
+        else:
+            # Fallback: try direct SDK if installed
+            from dhanhq import DhanContext
+
+            client = DhanContext(client_id=DHAN_CLIENT_ID, access_token=DHAN_ACCESS_TOKEN)
+            res = client.place_order(
+                security_id=security_id,
+                exch_seg="NSE",
+                transaction_type=side,
+                quantity=quantity,
+                order_type=order_type,
+                price=price,
+                product_type="INTRADAY",
+            )
+
         record_trade(side, quantity, price or 0, status="sent", info=res)
         return res
     except Exception:

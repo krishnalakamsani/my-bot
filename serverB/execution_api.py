@@ -20,7 +20,8 @@ class ExecRequest(BaseModel):
 def execute(req: ExecRequest):
     try:
         logging.info("Received execute request: %s", req.dict())
-        res = local_place_order(req.transaction_type, req.qty, price=None)
+        # call execution.place_order(side, security_id, quantity, order_type, price)
+        res = local_place_order(req.transaction_type, req.security_id, req.qty, price=None)
         return res or {"status": "error", "message": "unknown"}
     except Exception as e:
         logging.exception("Execution error: %s", e)

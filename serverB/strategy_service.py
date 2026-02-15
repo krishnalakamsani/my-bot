@@ -7,7 +7,6 @@ from datetime import datetime, timedelta
 import redis
 import pandas as pd
 import numpy as np
-from dhanhq import DhanContext
 from execution import place_order as exec_place_order
 from risk import check_risk
 
@@ -46,14 +45,8 @@ if not SIMULATE and (not DHAN_CLIENT_ID or not DHAN_ACCESS_TOKEN):
 if SECURITY_ID == "REPLACE_WITH_REAL_SECURITY_ID":
     logging.warning("SECURITY_ID not replaced; orders will not be placed until SECURITY_ID is configured.")
 
-# Initialize dhan client lazily (only if not sim)
-dhan = None
-if not SIMULATE and DHAN_CLIENT_ID and DHAN_ACCESS_TOKEN:
-    try:
-        dhan = DhanContext(client_id=DHAN_CLIENT_ID, access_token=DHAN_ACCESS_TOKEN)
-    except Exception as e:
-        logging.exception("Failed to initialize DhanContext: %s", e)
-        dhan = None
+# Strategy code should not initialize Dhan SDK. Order placement is handled
+# by the `execution` module which may use `dhan_api` or the SDK as appropriate.
 
 
 class BaseCandle:
@@ -101,26 +94,9 @@ def aggregate_candles(candles):
 
 
 def place_order(side, quantity, price=None):
-    logging.info("Placing order: %s %s @%s", side, quantity, price)
-    if SIMULATE:
-        logging.info("SIMULATE=true — order not sent to Dhan")
-        return None
-    if not dhan:
-        logging.error("Dhan client not available; cannot place order")
-        return None
-    try:
-        # Using MARKET order for simplicity; adjust as needed
-        return dhan.place_order(
-            security_id=SECURITY_ID,
-            exch_seg="NSE",
-            transaction_type=side,
-            quantity=quantity,
-            order_type="MARKET",
-            product_type="INTRADAY"
-        )
-    except Exception:
-        logging.exception("Order placement failed")
-        return None
+    """Delegate order placement to the `execution` module."""
+    logging.info("Strategy.place_order delegate: %s %s @%s", side, quantity, price)
+    return exec_place_order(side, SECURITY_ID, quantity, price=price)
 
 
 def main():
