@@ -119,3 +119,46 @@ Quick overview
   Next steps
 
   - I can also add concrete API examples (cURL / Python) for the MDS endpoints, or export the Mermaid diagram to PNG/SVG. Tell me which and I'll add it.
+
+## Recent Changes & How the Bot Works Now
+
+This project was refactored to an event-driven, hardened trading runtime. The bullets below summarize the important architectural and behavioral changes so you (or an operator) can understand and configure the bot quickly.
+
+- Event-driven execution: strategies publish `ENTRY_SIGNAL` / `EXIT_SIGNAL` events to an in-process `event_bus`. A single execution entry point (`serverB/execution.py`) subscribes and serializes all placements.
+- Formal trade lifecycle: `TradingBot` now models trades with a `TradeContext` and deterministic states (e.g. `SIGNAL_GENERATED` → `ENTRY_PENDING` → `ORDER_PLACED` → `POSITION_OPEN` → `EXIT_PENDING` → `CLOSED`). State transitions are driven by `ORDER_PLACED`, `ORDER_FILLED`, `ORDER_TIMEOUT` and `ORDER_SLIPPAGE` events.
+- Cross-process atomicity: to avoid double-entries across multiple instances, `execution.py` uses Postgres advisory locks (MD5-based keys derived from `pos_id`) in addition to the existing process-local re-entrant lock.
+- Order lifecycle events: execution emits structured lifecycle events: `ORDER_PLACED`, `ORDER_FILLED`, `ORDER_TIMEOUT`, and `ORDER_SLIPPAGE` (useful for monitoring, reconciliation and UI). Each event includes `pos_id` and DB `db_id` when available.
+- Pending-order monitor & timeouts: execution tracks pending orders and runs a background monitor that publishes `ORDER_TIMEOUT` if an order isn't filled within `order_timeout_seconds` (configurable).
+- Slippage guard: `trading_bot` inspects fills and if fill-price deviation exceeds `max_slippage_pct` it publishes `ORDER_SLIPPAGE` and issues an `EXIT_SIGNAL` to protect capital.
+- Risk guard / kill-switches: `trading_bot` enforces pre-execution risk checks and maintains `bot_state` counters. Configurable protections include `daily_max_loss`, `daily_max_loss_pct`, and `consecutive_losses_limit`. When thresholds are breached, `trading_enabled` is set to `False` and new entries are blocked.
+- Score engine changes: `serverB/score_engine.py` normalizes raw scores into `entry_score` and `exit_score` (0..1), splits entry/exit confidence, and applies multi-timeframe conflict reduction to reduce noisy cross-timeframe disagreement.
+- Position manager & reconciliation (partial): positions are created via the `position_manager` and recorded to the `trades` DB table. Execution emits lifecycle events so a reconciliation loop or external monitor can compare broker state vs internal state and reconcile differences (a reconciliation module is planned as the next step).
+- Tests: a concurrency test was added to validate serialization of entry/exit handling and prevent duplicate opens in a single-process environment.
+
+Config knobs (not exhaustive)
+- `order_timeout_seconds` — seconds before an order is considered timed-out (default: 30)
+- `max_slippage_pct` — allowed slippage percent before triggering exit (default: 0.5)
+- `daily_max_loss` / `daily_max_loss_pct` — absolute and percent daily loss limits
+- `consecutive_losses_limit` — number of losing trades before disabling trading
+- `mds_entry_score_min` / `mds_exit_score_min` — normalized score thresholds used by strategy runner
+- `base_lot` — base lot size used by dynamic sizing
+
+Operational notes
+- Use the `pos_id` returned by your strategy as a stable trade identifier — it is used to compute advisory locks and join events across modules.
+- When running multiple instances / containers, ensure Postgres is shared so advisory locks work across processes.
+- The execution background monitor attempts best-effort cancels for timed-out live orders; for full reconciliation, build a separate polling loop against the broker API to verify fills and order states.
+
+Files touched in recent refactor (high level)
+- `serverB/execution.py` — single execution entry point, advisory locks, pending-order monitoring, ORDER_* events
+- `serverB/trading_bot.py` — `TradeContext`, state machine handlers, risk checks, slippage guard, ORDER_TIMEOUT handler
+- `serverB/score_engine.py` — normalized `entry_score`/`exit_score` and MTF conflict reduction
+- `serverB/config.py` — added risk & execution configuration keys
+- `serverB/tests/run_concurrency_test.py` — concurrency test harness
+
+If you'd like, I can:
+- Add a short `OPERATION.md` with runbooks for kill-switch, forced stop and reconciliation commands.
+- Implement the execution reconciliation loop (poll broker and reconcile every 5–10s).
+- Expand ScoreEngine to the described 0–100 weighted institutional model (weighted MTF, per-indicator buckets and sizing rules).
+
+*** End of recent changes ***
+
