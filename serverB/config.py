@@ -186,6 +186,14 @@ config = {
     # Trading control
     "trading_enabled": True,  # If False: no new entries, but indicators/updates continue
 
+    # Hard risk guard (safety)
+    # daily_max_loss: absolute ₹ limit (existing) and daily_max_loss_pct: percent of equity (optional)
+    "daily_max_loss_pct": _env_float("DAILY_MAX_LOSS_PCT", 2.0),  # percent of equity
+    "consecutive_losses_limit": _env_int("CONSECUTIVE_LOSSES_LIMIT", 3),
+    "order_timeout_seconds": _env_int("ORDER_TIMEOUT_SECONDS", 30),
+    "max_slippage_pct": _env_float("MAX_SLIPPAGE_PCT", 0.5),  # percent
+    "base_lot": _env_int("BASE_LOT", 1),
+
     # ScoreMDS normalized thresholds (0..1 for entry/exit scores)
     "mds_entry_score_min": _env_float("MDS_ENTRY_SCORE_MIN", 0.25),
     "mds_exit_score_min": _env_float("MDS_EXIT_SCORE_MIN", 0.20),

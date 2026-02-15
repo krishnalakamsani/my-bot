@@ -40,6 +40,37 @@ def _default_signal_handler(payload):
     return None
 
 
+class TradeContext:
+    """Represents the lifecycle and metadata for a single trade attempt."""
+
+    def __init__(self, pos_id: str, symbol: str, side: str, size: int, entry_score: float = None):
+        self.pos_id = pos_id
+        self.symbol = symbol
+        self.side = side
+        self.size = int(size or 0)
+        self.entry_score = float(entry_score) if entry_score is not None else None
+        self.state = State.SIGNAL_GENERATED
+        self.entry_price = None
+        self.entry_time = None
+        self.db_id = None
+        self.trailing_stop = None
+        self.pnl = 0.0
+
+    def to_dict(self):
+        return {
+            'pos_id': self.pos_id,
+            'symbol': self.symbol,
+            'side': self.side,
+            'size': self.size,
+            'entry_score': self.entry_score,
+            'state': self.state.value if self.state else None,
+            'entry_price': self.entry_price,
+            'entry_time': self.entry_time.isoformat() if self.entry_time else None,
+            'db_id': self.db_id,
+            'pnl': self.pnl,
+        }
+
+
 
 class TradingBot:
     """Main trading bot engine"""
@@ -77,11 +108,16 @@ class TradingBot:
         self._initialize_indicator()
         # state machine
         self.state = State.IDLE
+        self.pending_order = None
+        # active TradeContext (one at a time for this simple runner)
+        self.trade_context = None
         # bind instance handlers for events
         try:
             subscribe("ENTRY_SIGNAL", lambda payload: asyncio.get_event_loop().call_soon_threadsafe(self._on_entry_signal_event, payload))
             subscribe("EXIT_SIGNAL", lambda payload: asyncio.get_event_loop().call_soon_threadsafe(self._on_exit_signal_event, payload))
+            subscribe("ORDER_PLACED", lambda payload: asyncio.get_event_loop().call_soon_threadsafe(self._on_order_placed_event, payload))
             subscribe("ORDER_FILLED", lambda payload: asyncio.get_event_loop().call_soon_threadsafe(self._on_order_filled_event, payload))
+            subscribe("ORDER_TIMEOUT", lambda payload: asyncio.get_event_loop().call_soon_threadsafe(self._on_order_timeout_event, payload))
         except Exception:
             # non-async contexts will ignore subscriptions
             pass
@@ -440,9 +476,55 @@ class TradingBot:
     def _on_entry_signal_event(self, payload):
         # Called when an ENTRY_SIGNAL is published by strategies
         try:
+            # ignore if already handling a trade
+            if self.trade_context and self.trade_context.state not in (State.CLOSED, State.IDLE):
+                logger.info("Ignoring ENTRY_SIGNAL, existing trade in state %s", getattr(self.trade_context.state, 'value', None))
+                return
+
             self.set_state(State.SIGNAL_GENERATED)
             # preserve last signal for downstream logic
             self.last_signal = payload
+
+            # Build TradeContext from payload
+            pos_id = payload.get('pos_id') or payload.get('trade_id') or f"pos_{int(datetime.utcnow().timestamp())}"
+            symbol = payload.get('symbol') or config.get('selected_index')
+            side = payload.get('side') or 'BUY'
+            # prefer explicit size; else compute from score/base_lot
+            score = None
+            try:
+                score = float(payload.get('score')) if payload.get('score') is not None else None
+            except Exception:
+                score = None
+            base_lot = int(config.get('base_lot', 1) or 1)
+            size = payload.get('quantity') or base_lot
+            if score:
+                try:
+                    multiplier = 1.0
+                    if score >= 75:
+                        multiplier = 1.5
+                    elif score >= 65:
+                        multiplier = 1.0
+                    elif score >= 55:
+                        multiplier = 0.5
+                    else:
+                        multiplier = 0.0
+                    size = max(0, int(base_lot * multiplier))
+                except Exception:
+                    size = int(size)
+
+            tc = TradeContext(pos_id=str(pos_id), symbol=str(symbol), side=str(side), size=int(size or 0), entry_score=score)
+
+            # pre-execution risk checks
+            if not self._risk_checks_approve(tc):
+                logger.warning("Risk checks failed for trade %s; aborting", pos_id)
+                return
+
+            tc.state = State.ENTRY_PENDING
+            self.trade_context = tc
+            try:
+                bot_state['trade_context'] = tc.to_dict()
+            except Exception:
+                pass
         except Exception:
             logger.exception("Error handling ENTRY_SIGNAL")
 
@@ -493,15 +575,155 @@ class TradingBot:
             except Exception:
                 pass
 
-            # Transition to POSITION_OPEN
+            # Transition to POSITION_OPEN and update TradeContext
             try:
+                # clear pending order if it matches
+                try:
+                    if self.pending_order and (str(self.pending_order.get('pos_id') or '') == str(trade_id) or str(self.pending_order.get('db_id') or '') == str(payload.get('db_id') or '')):
+                        self.pending_order = None
+                except Exception:
+                    pass
+
+                # If there's an active trade context, update it
+                try:
+                    if self.trade_context and (str(self.trade_context.pos_id) == str(trade_id) or str(self.trade_context.db_id) == str(payload.get('db_id') or '')):
+                        self.trade_context.entry_price = float(filled_price) if filled_price else None
+                        self.trade_context.entry_time = datetime.now(timezone.utc)
+                        self.trade_context.state = State.POSITION_OPEN
+                        try:
+                            bot_state['trade_context'] = self.trade_context.to_dict()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
                 self.set_state(State.POSITION_OPEN)
             except Exception:
                 pass
 
             logger.info(f"[ORDER] ORDER_FILLED processed | Trade={trade_id} Sec={security_id} Price={filled_price} Qty={filled_qty}")
+            # Slippage guard: if filled price deviates too much from expected
+            try:
+                expected = payload.get('price') or payload.get('expected_price')
+                if expected and filled_price:
+                    try:
+                        exp = float(expected)
+                        fp = float(filled_price)
+                        slippage_pct = abs(fp - exp) / (abs(exp) if abs(exp) > 1e-6 else 1.0) * 100.0
+                        max_slip = float(config.get('max_slippage_pct', 0.5) or 0.5)
+                        if slippage_pct > max_slip:
+                            logger.warning("Fill slippage %.2f%% > allowed %.2f%% for trade %s — triggering immediate exit", slippage_pct, max_slip, trade_id)
+                            try:
+                                publish('ORDER_SLIPPAGE', {'pos_id': trade_id, 'db_id': payload.get('db_id'), 'expected_price': exp, 'filled_price': fp, 'slippage_pct': slippage_pct})
+                            except Exception:
+                                pass
+                            try:
+                                publish('EXIT_SIGNAL', {'pos_id': trade_id, 'security_id': security_id, 'price': fp})
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            # If this fill corresponds to an EXIT for our trade context, finalize
+            try:
+                if self.trade_context and self.trade_context.state == State.EXIT_PENDING and (str(self.trade_context.pos_id) == str(trade_id) or str(self.trade_context.db_id) == str(payload.get('db_id') or '')):
+                    # compute result and clear
+                    try:
+                        self._record_trade_result(self.trade_context, filled_price)
+                    except Exception:
+                        logger.exception('Error recording trade result on exit')
+                    try:
+                        self.trade_context.state = State.CLOSED
+                        bot_state['trade_context'] = self.trade_context.to_dict()
+                    except Exception:
+                        pass
+                    # clear current position
+                    try:
+                        self.current_position = None
+                        bot_state['current_position'] = None
+                    except Exception:
+                        pass
+                    # reset local context
+                    try:
+                        self.trade_context = None
+                    except Exception:
+                        pass
+                    try:
+                        self.set_state(State.CLOSED)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
         except Exception:
             logger.exception("Error handling ORDER_FILLED event")
+
+
+    def _on_order_timeout_event(self, payload):
+        try:
+            if not payload:
+                return
+            pos_id = payload.get('pos_id') or payload.get('trade_id') or payload.get('db_id')
+            # If this corresponds to our active trade, abort and clear
+            try:
+                if self.trade_context and (str(self.trade_context.pos_id) == str(pos_id) or str(self.trade_context.db_id) == str(payload.get('db_id') or '')):
+                    logger.warning("Order timeout for trade %s — aborting trade_context", pos_id)
+                    # treat as failed attempt
+                    try:
+                        bot_state['consecutive_losses'] = int(bot_state.get('consecutive_losses', 0)) + 1
+                    except Exception:
+                        pass
+                    try:
+                        self.trade_context.state = State.CLOSED
+                        bot_state['trade_context'] = self.trade_context.to_dict()
+                    except Exception:
+                        pass
+                    try:
+                        self.trade_context = None
+                    except Exception:
+                        pass
+                    try:
+                        self.set_state(State.CLOSED)
+                    except Exception:
+                        pass
+        except Exception:
+            logger.exception('Error handling ORDER_TIMEOUT')
+
+
+    def _on_order_placed_event(self, payload):
+        """Handles ORDER_PLACED events to advance state to ORDER_PLACED and record pending order details."""
+        try:
+            if not payload:
+                return
+            trade_id = payload.get('pos_id') or payload.get('trade_id') or payload.get('db_id')
+            db_id = payload.get('db_id')
+            security_id = payload.get('security_id') or payload.get('symbol') or ''
+            qty = int(payload.get('qty') or payload.get('quantity') or 0)
+            price = payload.get('price') or payload.get('filled_price') or None
+
+            self.pending_order = {'pos_id': trade_id, 'db_id': db_id, 'security_id': str(security_id), 'qty': qty, 'price': price}
+            # attach to trade_context if present
+            try:
+                if self.trade_context and (str(self.trade_context.pos_id) == str(trade_id) or str(self.trade_context.db_id) == str(db_id)):
+                    self.trade_context.db_id = db_id
+                    self.trade_context.state = State.ORDER_PLACED
+                    try:
+                        bot_state['trade_context'] = self.trade_context.to_dict()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            try:
+                self.last_order_time_utc = datetime.now(timezone.utc)
+            except Exception:
+                pass
+            try:
+                self.set_state(State.ORDER_PLACED)
+            except Exception:
+                pass
+            logger.info(f"[ORDER] ORDER_PLACED recorded | Trade={trade_id} DB={db_id} Sec={security_id} Qty={qty} Price={price}")
+        except Exception:
+            logger.exception("Error handling ORDER_PLACED event")
 
     def _on_exit_signal_event(self, payload):
         try:
@@ -557,6 +779,98 @@ class TradingBot:
                 if not self.dhan:
                     return False
                 live_security_id = await self.dhan.get_atm_option_security_id(index_name, strike, option_type, expiry)
+
+            # If we are exiting and have an active TradeContext, update state and handle result
+            try:
+                if self.trade_context and self.trade_context.state == State.POSITION_OPEN:
+                    # mark exit pending
+                    self.trade_context.state = State.EXIT_PENDING
+                    try:
+                        bot_state['trade_context'] = self.trade_context.to_dict()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        # ---------------- Risk & State helpers ---------------------------------
+        def _risk_checks_approve(self, tc: TradeContext) -> bool:
+            # Enforce global trading_enabled
+            if not bool(config.get('trading_enabled', True)) or not bool(bot_state.get('trading_enabled', True)):
+                logger.warning("Trading disabled via config/state")
+                return False
+
+            # Daily absolute loss check
+            daily_pnl = float(bot_state.get('daily_pnl', 0.0) or 0.0)
+            daily_max_loss = float(config.get('daily_max_loss', 0) or 0)
+            if daily_max_loss and daily_pnl <= -abs(daily_max_loss):
+                logger.warning("Daily max loss exceeded (%.2f <= -%.2f)", daily_pnl, daily_max_loss)
+                bot_state['daily_max_loss_triggered'] = True
+                bot_state['trading_enabled'] = False
+                return False
+
+            # Consecutive losses check
+            consecutive = int(bot_state.get('consecutive_losses', 0) or 0)
+            limit = int(config.get('consecutive_losses_limit', 3) or 3)
+            if limit and consecutive >= limit:
+                logger.warning("Consecutive losses limit reached: %s", consecutive)
+                bot_state['trading_enabled'] = False
+                return False
+
+            # Minimum size and basic checks
+            if not tc.size or tc.size <= 0:
+                logger.warning("Computed trade size is zero; skipping")
+                return False
+
+            return True
+
+        def _record_trade_result(self, tc: TradeContext, exit_price: float):
+            try:
+                if not tc or tc.entry_price is None:
+                    return
+                # crude pnl calc: (exit - entry) * qty; sign depends on side
+                try:
+                    qty = int(tc.size or 0)
+                    if qty <= 0:
+                        return
+                    entry = float(tc.entry_price)
+                    pnl = (float(exit_price) - entry) * qty
+                    if str(tc.side).upper() in ('SELL', 'SHORT'):
+                        pnl = -pnl
+                except Exception:
+                    pnl = 0.0
+
+                tc.pnl = float(pnl)
+                # update bot_state totals
+                try:
+                    bot_state['daily_pnl'] = float(bot_state.get('daily_pnl', 0.0)) + pnl
+                except Exception:
+                    bot_state['daily_pnl'] = pnl
+
+                # consecutive loss tracking
+                try:
+                    if pnl < 0:
+                        bot_state['consecutive_losses'] = int(bot_state.get('consecutive_losses', 0)) + 1
+                    else:
+                        bot_state['consecutive_losses'] = 0
+                except Exception:
+                    pass
+
+                # kill switch enforcement
+                try:
+                    daily_max_loss = float(config.get('daily_max_loss', 0) or 0)
+                    if daily_max_loss and bot_state.get('daily_pnl', 0.0) <= -abs(daily_max_loss):
+                        bot_state['daily_max_loss_triggered'] = True
+                        bot_state['trading_enabled'] = False
+                except Exception:
+                    pass
+
+                # persist summary
+                try:
+                    bot_state['last_trade_result'] = {'pos_id': tc.pos_id, 'pnl': tc.pnl}
+                except Exception:
+                    pass
+            except Exception:
+                logger.exception('Error recording trade result')
 
             if not live_security_id:
                 return False
