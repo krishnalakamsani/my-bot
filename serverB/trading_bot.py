@@ -464,6 +464,90 @@ class TradingBot:
         if not security_id.startswith('SIM_'):
             return False
 
+        try:
+            index_name = str(self.current_position.get('index_name') or config.get('selected_index') or 'NIFTY')
+            strike = int(self.current_position.get('strike') or 0)
+            option_type = str(self.current_position.get('option_type') or '')
+            expiry = str(self.current_position.get('expiry') or '')
+            if not (index_name and strike and option_type and expiry):
+                return False
+
+            provider = str(config.get('market_data_provider', 'dhan') or 'dhan').strip().lower()
+            base_url = str(config.get('mds_base_url', '') or '').strip()
+            live_security_id = None
+
+            # If MDS is configured, do NOT initialize or call Dhan for market data.
+            if provider == 'mds' and base_url:
+                from mds_client import fetch_option_chain, fetch_quote
+                oc_payload = await fetch_option_chain(base_url=base_url, symbol=index_name, expiry=expiry)
+                try:
+                    oc = oc_payload.get('oc') if isinstance(oc_payload, dict) else oc_payload
+                    if isinstance(oc, dict):
+                        for k, node in oc.items():
+                            try:
+                                kf = float(k)
+                            except Exception:
+                                continue
+                            if int(round(kf)) == int(strike):
+                                node_obj = node if isinstance(node, dict) else {}
+                                target = node_obj.get('ce') if option_type == 'CE' else node_obj.get('pe')
+                                if isinstance(target, dict):
+                                    sid = target.get('security_id') or target.get('securityId')
+                                    if sid:
+                                        live_security_id = str(sid)
+                                        break
+                except Exception:
+                    live_security_id = None
+            else:
+                # Only initialize Dhan when not using MDS as provider
+                if not self.dhan:
+                    try:
+                        # Only initialize if provider allows direct Dhan usage
+                        if provider != 'mds':
+                            self.initialize_dhan()
+                    except Exception:
+                        pass
+                if not self.dhan:
+                    return False
+                live_security_id = await self.dhan.get_atm_option_security_id(index_name, strike, option_type, expiry)
+
+            if not live_security_id:
+                return False
+
+            # Fetch option LTP via MDS when configured, otherwise via Dhan
+            if provider == 'mds' and base_url:
+                q = await fetch_quote(base_url=base_url, symbol=f"SEC_{live_security_id}")
+                option_ltp = None
+                try:
+                    option_ltp = float(q.get('ltp')) if isinstance(q, dict) and q.get('ltp') is not None else None
+                except Exception:
+                    option_ltp = None
+            else:
+                option_ltp = await self.dhan.get_option_ltp(
+                    security_id=live_security_id,
+                    strike=strike,
+                    option_type=option_type,
+                    expiry=expiry,
+                    index_name=index_name,
+                )
+            if not option_ltp or float(option_ltp) <= 0:
+                return False
+
+            option_ltp = round(float(option_ltp) / 0.05) * 0.05
+            option_ltp = round(float(option_ltp), 2)
+
+            self.current_position['security_id'] = str(live_security_id)
+            bot_state['current_position'] = self.current_position
+            bot_state['current_option_ltp'] = option_ltp
+
+            logger.info(
+                f"[PAPER] SIM->LIVE quotes enabled | {index_name} {option_type} {strike} | SecID: {live_security_id} | LTP: {option_ltp}"
+            )
+            return True
+        except Exception as e:
+            logger.debug(f"[PAPER] SIM->LIVE upgrade failed: {e}")
+            return False
+
     # --- State machine helpers -------------------------------------------------
     def set_state(self, new_state: State):
         try:
@@ -879,43 +963,6 @@ class TradingBot:
                 pass
         except Exception:
             logger.exception('Error recording trade result')
-
-            if not live_security_id:
-                return False
-
-            # Fetch option LTP via MDS when configured, otherwise via Dhan
-            if provider == 'mds' and base_url:
-                q = await fetch_quote(base_url=base_url, symbol=f"SEC_{live_security_id}")
-                option_ltp = None
-                try:
-                    option_ltp = float(q.get('ltp')) if isinstance(q, dict) and q.get('ltp') is not None else None
-                except Exception:
-                    option_ltp = None
-            else:
-                option_ltp = await self.dhan.get_option_ltp(
-                    security_id=live_security_id,
-                    strike=strike,
-                    option_type=option_type,
-                    expiry=expiry,
-                    index_name=index_name,
-                )
-            if not option_ltp or float(option_ltp) <= 0:
-                return False
-
-            option_ltp = round(float(option_ltp) / 0.05) * 0.05
-            option_ltp = round(float(option_ltp), 2)
-
-            self.current_position['security_id'] = str(live_security_id)
-            bot_state['current_position'] = self.current_position
-            bot_state['current_option_ltp'] = option_ltp
-
-            logger.info(
-                f"[PAPER] SIM->LIVE quotes enabled | {index_name} {option_type} {strike} | SecID: {live_security_id} | LTP: {option_ltp}"
-            )
-            return True
-        except Exception as e:
-            logger.debug(f"[PAPER] SIM->LIVE upgrade failed: {e}")
-            return False
 
     async def _init_paper_replay(self) -> None:
         """Load candle data from DB for after-hours paper replay."""
