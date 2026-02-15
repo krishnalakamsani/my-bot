@@ -42,7 +42,8 @@ services:
     volumes:
       - ../:/app
     working_dir: /app/serverA
-    command: uvicorn market_data_service:app --host 0.0.0.0 --port 8000
+    # install minimal runtime dependencies at container start (fast, avoids separate Dockerfile)
+    command: /bin/sh -c "pip install --no-cache-dir fastapi uvicorn psycopg2-binary redis httpx pandas numpy || true && uvicorn market_data_service:app --host 0.0.0.0 --port 8000"
     environment:
       POSTGRES_HOST: postgres
       POSTGRES_DB: ${POSTGRES_DB:-candles}
