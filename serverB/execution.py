@@ -35,13 +35,15 @@ POSTGRES_USER = os.getenv("POSTGRES_USER", "postgres")
 POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD") or _read_secret_from_file(os.getenv("POSTGRES_PASSWORD_FILE")) or "postgres"
 SIMULATE = os.getenv("SIMULATE", "true").lower() in ("1", "true", "yes")
 
-conn = None
 
-# Global re-entrant lock to serialize execution actions (entry/exit)
 _exec_lock = threading.RLock()
 
 # In-memory pending orders map: pos_id -> metadata
 _pending_orders = {}
+
+
+def get_conn():
+    return psycopg2.connect(host=POSTGRES_HOST, dbname=POSTGRES_DB, user=POSTGRES_USER, password=POSTGRES_PASSWORD)
 
 
 def _start_pending_monitor():
@@ -66,7 +68,6 @@ def _start_pending_monitor():
                                     # attempt broker cancel if available
                                     try:
                                         if 'order_id' in broker_info and (DhanAPI is not None or True):
-                                            # best-effort: use DhanAPI cancel if available
                                             try:
                                                 if DhanAPI is not None:
                                                     client = DhanAPI(DHAN_ACCESS_TOKEN, DHAN_CLIENT_ID)
@@ -86,10 +87,9 @@ def _start_pending_monitor():
                                 pass
                             # mark DB record as timed-out
                             try:
-                                cur = conn.cursor()
-                                cur.execute("UPDATE trades SET status=%s WHERE id=%s", ("timed_out", meta.get('db_id')))
-                                conn.commit()
-                                cur.close()
+                                with get_conn() as _c:
+                                    with _c.cursor() as cur:
+                                        cur.execute("UPDATE trades SET status=%s WHERE id=%s", ("timed_out", meta.get('db_id')))
                             except Exception:
                                 pass
                             # remove from pending map
@@ -116,39 +116,41 @@ except Exception:
 
 
 def ensure_db():
-    global conn
-    if conn:
-        return
-    conn = psycopg2.connect(host=POSTGRES_HOST, dbname=POSTGRES_DB, user=POSTGRES_USER, password=POSTGRES_PASSWORD)
-    cur = conn.cursor()
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS trades (
-            id SERIAL PRIMARY KEY,
-            ts TIMESTAMP,
-            side TEXT,
-            quantity INTEGER,
-            price DOUBLE PRECISION,
-            status TEXT,
-            info JSONB
-        )
-        """
-    )
-    conn.commit()
-    cur.close()
+    # Ensure trades table exists
+    try:
+        with get_conn() as _c:
+            with _c.cursor() as cur:
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS trades (
+                        id SERIAL PRIMARY KEY,
+                        ts TIMESTAMP,
+                        side TEXT,
+                        quantity INTEGER,
+                        price DOUBLE PRECISION,
+                        status TEXT,
+                        info JSONB
+                    )
+                    """
+                )
+    except Exception:
+        logging.exception('Failed to ensure trades table')
 
 
 def record_trade(side, quantity, price, status="created", info=None):
     ensure_db()
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO trades (ts, side, quantity, price, status, info) VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
-        (datetime.utcnow(), side, quantity, price, status, json.dumps(info) if info else None),
-    )
-    tid = cur.fetchone()[0]
-    conn.commit()
-    cur.close()
-    return tid
+    try:
+        with get_conn() as _c:
+            with _c.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO trades (ts, side, quantity, price, status, info) VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
+                    (datetime.utcnow(), side, quantity, price, status, json.dumps(info) if info else None),
+                )
+                tid = cur.fetchone()[0]
+            return tid
+    except Exception:
+        logging.exception('Failed to record trade')
+        return None
 
 
 def _compute_lock_key(key_str: str) -> int:
@@ -163,31 +165,23 @@ def _compute_lock_key(key_str: str) -> int:
 
 def _acquire_advisory_lock(lock_key: int) -> bool:
     try:
-        ensure_db()
-        cur = conn.cursor()
-        cur.execute("SELECT pg_try_advisory_lock(%s)", (lock_key,))
-        res = cur.fetchone()[0]
-        cur.close()
-        return bool(res)
+        with get_conn() as _c:
+            with _c.cursor() as cur:
+                cur.execute("SELECT pg_try_advisory_lock(%s)", (lock_key,))
+                res = cur.fetchone()[0]
+                return bool(res)
     except Exception:
-        try:
-            cur.close()
-        except Exception:
-            pass
+        logging.exception('Failed to acquire advisory lock')
         return False
 
 
 def _release_advisory_lock(lock_key: int) -> None:
     try:
-        ensure_db()
-        cur = conn.cursor()
-        cur.execute("SELECT pg_advisory_unlock(%s)", (lock_key,))
-        cur.close()
+        with get_conn() as _c:
+            with _c.cursor() as cur:
+                cur.execute("SELECT pg_advisory_unlock(%s)", (lock_key,))
     except Exception:
-        try:
-            cur.close()
-        except Exception:
-            pass
+        logging.exception('Failed to release advisory lock')
 
 
 def _handle_entry_signal(payload):
@@ -211,9 +205,27 @@ def _handle_entry_signal(payload):
             logging.warning("Could not acquire advisory lock for pos=%s; skipping entry to avoid duplicate placement", pos_id)
             return
 
+        # global daily loss / kill-switch checks
+        try:
+            if bool(bot_state.get('daily_max_loss_triggered', False)):
+                logging.warning('Daily max loss triggered; blocking entry for pos=%s', pos_id)
+                return
+            daily_pnl = float(bot_state.get('daily_pnl', 0.0) or 0.0)
+            daily_max_loss = float(config.get('daily_max_loss', 0) or 0)
+            if daily_max_loss and daily_pnl <= -abs(daily_max_loss):
+                logging.warning('Daily max loss exceeded; blocking entry for pos=%s', pos_id)
+                bot_state['daily_max_loss_triggered'] = True
+                bot_state['trading_enabled'] = False
+                return
+        except Exception:
+            pass
+
         with _exec_lock:
             symbol = payload.get('symbol')
             quantity = int(payload.get('quantity') or 0)
+            if quantity <= 0:
+                logging.error("Invalid quantity for entry: %s", quantity)
+                return
             price = float(payload.get('price') or 0.0)
             security_id = payload.get('security_id')
 
@@ -232,6 +244,11 @@ def _handle_entry_signal(payload):
                     pass
                 default_manager.open_position(pos_id, symbol, side, quantity, price, security_id=security_id)
                 publish('ORDER_FILLED', {'trade_id': pos_id, 'db_id': tid, 'pos_id': pos_id, 'security_id': security_id, 'symbol': symbol, 'filled_qty': quantity, 'filled_price': price, 'status': 'simulated', 'filled_ts': datetime.utcnow().isoformat()})
+                # cleanup pending map for simulated immediate fills
+                try:
+                    _pending_orders.pop(pos_id, None)
+                except Exception:
+                    pass
                 return
 
             if not DHAN_CLIENT_ID or not DHAN_ACCESS_TOKEN:
@@ -265,6 +282,15 @@ def _handle_entry_signal(payload):
                         product_type="INTRADAY",
                     )
 
+                # validate broker response for immediate rejection
+                try:
+                    if isinstance(res, dict) and str(res.get('status', '')).lower() in ("rejected", "failed"):
+                        logging.error("Broker rejected entry order: %s", res)
+                        record_trade(side, quantity, price or 0, status="rejected", info={'res': res, 'pos_id': pos_id})
+                        return
+                except Exception:
+                    pass
+
                 tid = record_trade(side, quantity, price or 0, status="sent", info={'res': res, 'pos_id': pos_id})
                 # publish ORDER_PLACED
                 try:
@@ -281,7 +307,7 @@ def _handle_entry_signal(payload):
                 except Exception:
                     pass
 
-                # best-effort: if broker reports an immediate fill, emit ORDER_FILLED
+                # best-effort: if broker reports an immediate fill, emit ORDER_FILLED and place SL
                 try:
                     filled = False
                     filled_qty = None
@@ -293,6 +319,52 @@ def _handle_entry_signal(payload):
                         filled_price = res.get('avg_price') or res.get('filled_price') or res.get('avgPrice')
                     if filled or (filled_qty and filled_price):
                         publish('ORDER_FILLED', {'trade_id': pos_id, 'db_id': tid, 'pos_id': pos_id, 'security_id': security_id, 'symbol': symbol, 'filled_qty': filled_qty or quantity, 'filled_price': filled_price or price, 'status': 'filled', 'broker_info': res, 'filled_ts': datetime.utcnow().isoformat()})
+                        # cleanup pending map after immediate broker fill
+                        try:
+                            _pending_orders.pop(pos_id, None)
+                        except Exception:
+                            pass
+                        # place broker-side stop-loss if configured
+                        try:
+                            sl_points = float(config.get('initial_stoploss', 0) or 0)
+                            if sl_points and not SIMULATE:
+                                try:
+                                    entry_price = float(filled_price or price or 0)
+                                    if entry_price:
+                                        if str(side).upper() == 'BUY':
+                                            trigger = max(0.0, entry_price - sl_points)
+                                            sl_side = 'SELL'
+                                        else:
+                                            trigger = entry_price + sl_points
+                                            sl_side = 'BUY'
+                                        try:
+                                            if DhanAPI is not None:
+                                                client = DhanAPI(DHAN_ACCESS_TOKEN, DHAN_CLIENT_ID)
+                                                client.dhan.place_order(
+                                                    security_id=security_id,
+                                                    exch_seg='NSE',
+                                                    transaction_type=sl_side,
+                                                    quantity=quantity,
+                                                    order_type='SL-M',
+                                                    trigger_price=trigger,
+                                                    product_type='INTRADAY',
+                                                )
+                                            else:
+                                                from dhanhq import DhanContext
+                                                client = DhanContext(client_id=DHAN_CLIENT_ID, access_token=DHAN_ACCESS_TOKEN)
+                                                client.place_order(
+                                                    security_id=security_id,
+                                                    exch_seg='NSE',
+                                                    transaction_type=sl_side,
+                                                    quantity=quantity,
+                                                    order_type='SL-M',
+                                                    trigger_price=trigger,
+                                                    product_type='INTRADAY',
+                                                )
+                                        except Exception:
+                                            logging.exception('Failed placing broker SL order')
+                        except Exception:
+                            pass
                 except Exception:
                     logging.exception('Failed to evaluate broker fill and publish ORDER_FILLED')
             except Exception:
@@ -335,8 +407,101 @@ def _handle_exit_signal(payload):
                 if not p:
                     logging.warning("Unknown position %s for exit", pos_id)
                     return
+                # validate quantity
+                try:
+                    qty = int(p.get('quantity') or p.get('qty') or 0)
+                except Exception:
+                    qty = 0
+                if qty <= 0:
+                    logging.error("Invalid quantity for exit for pos %s: %s", pos_id, qty)
+                    return
+
+                # For live mode: place reverse order at broker first
+                if not SIMULATE:
+                    if not DHAN_CLIENT_ID or not DHAN_ACCESS_TOKEN:
+                        logging.error("Dhan credentials missing; cannot place live exit order")
+                        return
+                    try:
+                        if DhanAPI is not None:
+                            client = DhanAPI(DHAN_ACCESS_TOKEN, DHAN_CLIENT_ID)
+                            res = client.dhan.place_order(
+                                security_id=p.get('security_id'),
+                                exch_seg="NSE",
+                                transaction_type=("SELL" if str(p.get('side')).upper() == 'BUY' else "BUY"),
+                                quantity=qty,
+                                order_type="MARKET",
+                                product_type="INTRADAY",
+                            )
+                        else:
+                            from dhanhq import DhanContext
+
+                            client = DhanContext(client_id=DHAN_CLIENT_ID, access_token=DHAN_ACCESS_TOKEN)
+                            res = client.place_order(
+                                security_id=p.get('security_id'),
+                                exch_seg="NSE",
+                                transaction_type=("SELL" if str(p.get('side')).upper() == 'BUY' else "BUY"),
+                                quantity=qty,
+                                order_type="MARKET",
+                                product_type="INTRADAY",
+                            )
+                    except Exception:
+                        logging.exception("Live exit order failed")
+                        return
+
+                    # validate broker response
+                    try:
+                        if isinstance(res, dict) and str(res.get('status', '')).lower() in ("rejected", "failed"):
+                            logging.error("Broker rejected exit order: %s", res)
+                            record_trade(p.get('side'), qty, price or 0, status="rejected", info={'res': res, 'pos_id': pos_id})
+                            return
+                    except Exception:
+                        pass
+
+                    # record trade placement and track pending
+                    try:
+                        tid = record_trade(("SELL" if str(p.get('side')).upper() == 'BUY' else "BUY"), qty, price or 0, status="sent", info={'res': res, 'pos_id': pos_id})
+                    except Exception:
+                        tid = None
+                    try:
+                        placed_payload = {'trade_id': pos_id, 'db_id': tid, 'pos_id': pos_id, 'security_id': p.get('security_id'), 'symbol': p.get('symbol'), 'qty': qty, 'price': price, 'status': 'sent', 'broker_info': res, 'placed_ts': datetime.utcnow().isoformat()}
+                        publish('ORDER_PLACED', placed_payload)
+                    except Exception:
+                        logging.exception('Failed to publish ORDER_PLACED for exit')
+                    try:
+                        _pending_orders[pos_id] = {'db_id': tid, 'pos_id': pos_id, 'placed_ts': datetime.utcnow(), 'qty': qty, 'side': ("SELL" if str(p.get('side')).upper() == 'BUY' else "BUY"), 'price': price, 'broker_info': res}
+                    except Exception:
+                        pass
+
+                    # best-effort immediate fill detection
+                    try:
+                        filled = False
+                        filled_qty = None
+                        filled_price = None
+                        if isinstance(res, dict):
+                            if res.get('status') and str(res.get('status')).lower() in ('filled', 'complete', 'filled_with_trade'):
+                                filled = True
+                            filled_qty = res.get('filled_quantity') or res.get('filledQty') or res.get('filled_qty')
+                            filled_price = res.get('avg_price') or res.get('filled_price') or res.get('avgPrice')
+                        if filled or (filled_qty and filled_price):
+                            # broker reports filled: finalize internal close
+                            default_manager.close_position(pos_id, filled_price or price)
+                            record_trade(p.get('side'), qty, filled_price or price or 0, status="closed", info={"pos_id": pos_id, 'broker_info': res})
+                            # cleanup pending
+                            try:
+                                _pending_orders.pop(pos_id, None)
+                            except Exception:
+                                pass
+                            return
+                    except Exception:
+                        logging.exception('Failed to evaluate broker fill for exit')
+
+                    # otherwise leave position open internally until ORDER_FILLED from broker or reconciliation
+                    logging.info('Exit order sent to broker for pos=%s; awaiting fill', pos_id)
+                    return
+
+                # SIMULATE: just close internally
                 default_manager.close_position(pos_id, price)
-                record_trade(p.side, p.quantity, price or 0, status="closed", info={"pos_id": pos_id})
+                record_trade(p.get('side'), qty, price or 0, status="closed", info={"pos_id": pos_id})
                 return
 
         # fallback: try to close by security_id
@@ -377,10 +542,25 @@ def _handle_exit_signal(payload):
             pass
 
 
+def _handle_order_filled_cleanup(payload):
+    try:
+        if not payload:
+            return
+        pos_id = payload.get('pos_id') or payload.get('trade_id') or payload.get('db_id')
+        if pos_id:
+            try:
+                _pending_orders.pop(pos_id, None)
+            except Exception:
+                pass
+    except Exception:
+        logging.exception('Error cleaning pending orders on ORDER_FILLED')
+
+
 # Register handlers on import so the event-driven pattern works without extra wiring.
 try:
     subscribe("ENTRY_SIGNAL", _handle_entry_signal)
     subscribe("EXIT_SIGNAL", _handle_exit_signal)
+    subscribe("ORDER_FILLED", _handle_order_filled_cleanup)
 except Exception:
     logging.exception("Failed to subscribe execution handlers")
 
@@ -392,4 +572,3 @@ def place_order(side, security_id, quantity, order_type="MARKET", price=None):
     from event_bus import publish
     publish("ENTRY_SIGNAL", payload)
     return {"status": "queued"}
-
