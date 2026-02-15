@@ -1,23 +1,38 @@
-version: '3.8'
+version: '3.9'
 
 services:
-  postgres:
-    image: postgres:15
-    restart: unless-stopped
-    environment:
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: candles
-      POSTGRES_USER: postgres
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    networks:
-      - mybot_net
-
   redis:
     image: redis:7
     restart: unless-stopped
+    env_file:
+      - ../.env
     ports:
       - "6379:6379"
+    command: ["/bin/sh","-c","if [ -n \"${REDIS_PASSWORD}\" ]; then redis-server --requirepass ${REDIS_PASSWORD}; else redis-server; fi"]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - mybot_net
+
+  postgres:
+    image: postgres:15
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-candles}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD_MDS:-postgres}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-candles}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks:
       - mybot_net
 
@@ -25,16 +40,15 @@ services:
     image: python:3.10-slim
     restart: unless-stopped
     volumes:
-      - ./:/app
-    working_dir: /app
-    command: uvicorn serverA.market_data_service:app --host 0.0.0.0 --port 8000
+      - ../:/app
+    working_dir: /app/serverA
+    command: uvicorn market_data_service:app --host 0.0.0.0 --port 8000
     environment:
       POSTGRES_HOST: postgres
-      POSTGRES_DB: candles
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: ${POSTGRES_DB:-candles}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD_MDS:-postgres}
       REDIS_HOST: redis
-      # If you use Redis password, set REDIS_PASSWORD here or via env file
     ports:
       - "8000:8000"
     depends_on:
@@ -44,86 +58,8 @@ services:
       - mybot_net
 
 volumes:
-  pgdata:
+  postgres_data:
 
 networks:
   mybot_net:
     driver: bridge
-version: "3.9"
-
-services:
-  redis:
-    image: redis:7
-    env_file:
-      - ../.env
-    expose:
-      - "6379"
-    command: ["/bin/sh","-c","redis-server --requirepass ${REDIS_PASSWORD}"]
-    healthcheck:
-      test: ["CMD-SHELL", "redis-cli -a ${REDIS_PASSWORD} ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  postgres:
-    image: postgres:15
-    expose:
-      - "5432"
-    environment:
-      - POSTGRES_DB=${POSTGRES_DB:-candles}
-      - POSTGRES_USER=${POSTGRES_USER:-postgres}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD_MDS:-postgres}
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    env_file:
-      - ../.env
-
-  feed:
-    build: .
-    environment:
-      - DHAN_CLIENT_ID=${DHAN_CLIENT_ID}
-      - DHAN_ACCESS_TOKEN=${DHAN_ACCESS_TOKEN}
-      - REDIS_PASSWORD=${REDIS_PASSWORD}
-    env_file:
-      - ../.env
-    depends_on:
-      - redis
-
-  candle_builder:
-    build: .
-    command: python candle_builder.py
-    environment:
-      - REDIS_HOST=redis
-      - REDIS_PASSWORD=${REDIS_PASSWORD}
-      - POSTGRES_HOST=postgres
-      - POSTGRES_DB=${POSTGRES_DB:-candles}
-      - POSTGRES_USER=${POSTGRES_USER:-postgres}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD_MDS:-postgres}
-    env_file:
-      - ../.env
-    depends_on:
-      - redis
-      - postgres
-
-  market_data:
-    build: .
-    command: uvicorn market_data_service:app --host 0.0.0.0 --port 8002
-    environment:
-      - POSTGRES_HOST=postgres
-      - POSTGRES_DB=${POSTGRES_DB:-candles}
-      - POSTGRES_USER=${POSTGRES_USER:-postgres}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD_MDS:-postgres}
-    env_file:
-      - ../.env
-    expose:
-      - "8002"
-    depends_on:
-      - postgres
-
-volumes:
-  postgres_data:
