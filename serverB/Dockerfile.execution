@@ -9,4 +9,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 # copy project
 COPY . /app
 
-CMD ["python", "serverB/execution.py"]
+CMD ["python", "serverB/run_execution.py"]
