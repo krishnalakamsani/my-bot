@@ -38,7 +38,7 @@ services:
     volumes:
       - ../:/app
     working_dir: /app
-    command: /bin/sh -c "pip install --no-cache-dir redis || true && python serverB/trading_bot.py"
+    command: /bin/sh -c "pip install --no-cache-dir redis requests || true && python serverB/trading_bot.py"
     env_file:
       - ./.env
     environment:
