@@ -578,5 +578,3 @@ def place_order(side, security_id, quantity, order_type="MARKET", price=None):
 
 import time
 
-while True:
-    time.sleep(60)

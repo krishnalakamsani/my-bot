@@ -1,14 +1,9 @@
-version: '3.9'
-
 services:
-  # Core bot services
   execution:
-    image: python:3.10-slim
+    build:
+      context: ..
+      dockerfile: serverB/Dockerfile.execution
     restart: unless-stopped
-    volumes:
-      - ../:/app
-    working_dir: /app
-    command: /bin/sh -c "pip install --no-cache-dir redis psycopg2-binary || true && python serverB/execution.py"
     env_file:
       - ./.env
     environment:
@@ -18,12 +13,10 @@ services:
       - mybot_net
 
   strategy:
-    image: python:3.10-slim
+    build:
+      context: ..
+      dockerfile: serverB/Dockerfile.strategy
     restart: unless-stopped
-    volumes:
-      - ../:/app
-    working_dir: /app
-    command: /bin/sh -c "pip install --no-cache-dir redis pandas numpy httpx || true && python serverB/strategy_service.py"
     env_file:
       - ./.env
     environment:
@@ -33,19 +26,17 @@ services:
       - mybot_net
 
   trading_bot:
-    image: python:3.10-slim
+    build:
+      context: ..
+      dockerfile: serverB/Dockerfile.trading_bot
     restart: unless-stopped
-    volumes:
-      - ../:/app
-    working_dir: /app
-    command: /bin/sh -c "pip install --no-cache-dir -r serverB/requirements.txt || true && python serverB/trading_bot.py"
     env_file:
       - ./.env
     environment:
       SIMULATE: ${SIMULATE:-true}
     networks:
       - mybot_net
-  # Local infra (can be removed if using Server A's infra)
+
   postgres:
     image: postgres:15
     restart: unless-stopped
