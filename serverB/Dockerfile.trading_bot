@@ -7,4 +7,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . /app
 
-CMD ["python", "serverB/trading_bot.py"]
+CMD ["python", "serverB/run_trading_bot.py"]
