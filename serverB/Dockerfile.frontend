@@ -6,8 +6,9 @@ WORKDIR /app
 COPY serverB/frontend/package.json ./
 COPY serverB/frontend/ ./
 
-RUN npm install --legacy-peer-deps
-RUN npm run build
+	RUN npm install --legacy-peer-deps \
+		&& npm install ajv@^8 ajv-keywords@^5
+	RUN npm run build
 
 FROM node:18-bullseye-slim AS runner
 WORKDIR /app
